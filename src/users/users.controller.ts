@@ -1,14 +1,5 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  Headers,
-  Param,
-  ParseIntPipe,
-  Patch,
-  Post,
-} from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
+import { AuthHeader } from '../common/auth-header.decorator';
 import {
   UsersService,
   type CreateUserInput,
@@ -20,7 +11,7 @@ export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
   @Get('me')
-  getMe(@Headers('authorization') authHeader?: string) {
+  getMe(@AuthHeader() authHeader?: string) {
     return this.usersService.getMe(authHeader);
   }
 

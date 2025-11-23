@@ -32,7 +32,12 @@ export class UsersService {
     const [user] = await this.db
       .select()
       .from(schema.users)
-      .where(and(eq(schema.users.clerkId, clerkId), eq(schema.users.isDeleted, false)));
+      .where(
+        and(
+          eq(schema.users.clerkId, clerkId),
+          eq(schema.users.isDeleted, false),
+        ),
+      );
 
     if (!user) {
       throw new NotFoundException('User not found');
@@ -121,7 +126,9 @@ export class UsersService {
 
     const match = authHeader.match(/^Bearer (.+)$/i);
     if (!match) {
-      throw new UnauthorizedException('Authorization header must be a Bearer token');
+      throw new UnauthorizedException(
+        'Authorization header must be a Bearer token',
+      );
     }
 
     const token = match[1];
@@ -131,7 +138,9 @@ export class UsersService {
     }
 
     try {
-      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+      const payload = JSON.parse(
+        Buffer.from(parts[1], 'base64url').toString('utf8'),
+      );
       const clerkId = payload.sub as string | undefined;
       if (!clerkId) {
         throw new Error('Missing sub');

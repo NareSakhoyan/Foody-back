@@ -1,98 +1,54 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Foody Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Small NestJS + Drizzle API for recipes and users. This document lists the available endpoints and what each service function does at a high level.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Auth
+- Uses a bearer token (`Authorization: Bearer <jwt>`) whose payload includes `sub` as the Clerk user id.
+- Many endpoints require auth. Public listing/viewing can omit the header.
 
-## Description
+## Recipe Model (core fields)
+- `id` (uuid), `name`, `slug`, `shortDescription`, `imageUrl`
+- `prepDescription`, `cookDescription`
+- `prepTimeMinutes`, `cookTimeMinutes`, `servings`
+- `ingredients` (array of `{ name, quantity, measureUnit, note? }`)
+- `tags` (string array), `isPublic` (boolean), `status` (`draft | published | archived`)
+- `authorId` (internal user id), `createdAt`, `updatedAt`
+- `steps` is currently not collected; it is stored as `null`.
+- Responses from list endpoints include `author: { id, name, imageUrl }`.
+- Favorites: users can mark recipes as favorites; stored in `recipe_favorites` (unique per user/recipe).
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Recipes Endpoints
+- `GET /recipes` — Public list of recipes. If the auth header is provided, also includes the caller’s private recipes. Sorted by `updatedAt` desc. Returns author info with each recipe.
+- `GET /recipes/mine` — Auth required. Lists only the caller’s recipes, sorted by `updatedAt` desc, with author info.
+- `GET /recipes/favorites` — Auth required. Lists the caller’s favorited recipes, sorted by `updatedAt`.
+- `GET /recipes/:id` — Public if the recipe is `isPublic`; otherwise requires the author. Returns the recipe.
+- `POST /recipes/:id/favorite` — Auth required. Adds the recipe to the caller’s favorites (no-op if already favorited).
+- `POST /recipes` — Auth required. Creates a recipe. Required body: `name`, `slug`, `ingredients`. Optional: `shortDescription`, `imageUrl`, `prepDescription`, `cookDescription`, `prepTimeMinutes`, `cookTimeMinutes`, `servings`, `tags`, `isPublic`, `status`.
+- `PATCH /recipes/:id` — Auth required. Only the author can update. Body may include any mutable fields above (except `ingredients`/`slug` are optional here).
+- `DELETE /recipes/:id/favorite` — Auth required. Removes the recipe from favorites.
+- `DELETE /recipes/:id` — Auth required. Only the author can delete.
 
-## Project setup
+## Users Endpoints (brief)
+- `GET /users/me` — Auth required. Returns the current user.
+- `POST /users` — Upserts a user from Clerk data (`clerkId`, `email`, optional `name`, `imageUrl`).
+- `PATCH /users/:id` — Updates `name`/`imageUrl`.
+- `DELETE /users/:id` — Soft deletes the user.
 
+## Service Function Notes
+- `getAll` (recipes.service) — Builds visibility based on auth, joins author, orders by `updatedAt`.
+- `getMine` — Filters by caller’s `authorId`, returns author info, sorted by `updatedAt`.
+- `getFavorites` — Returns the caller’s favorites with author info, sorted by `updatedAt`.
+- `addFavorite` / `removeFavorite` — Add/remove a recipe to/from the caller’s favorites. Requires auth.
+- `getOne` — Permits public access when `isPublic`; otherwise enforces author ownership.
+- `create` — Validates `name`, `slug`, `ingredients`; rejects duplicate slugs; stores `steps` as `null`.
+- `update` — Prevents empty payloads and duplicate slug collisions; enforces author ownership.
+- `delete` — Enforces author ownership before removal.
+- User service functions mirror the HTTP endpoints and validate presence/format of auth tokens.
+
+## Development
 ```bash
-$ npm install
+npm install
+npm run start:dev
+npm run build
+npm run test
 ```
-
-## Compile and run the project
-
-```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
-```
-
-## Run tests
-
-```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
-```
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).

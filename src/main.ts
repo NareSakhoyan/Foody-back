@@ -16,10 +16,19 @@ async function bootstrap() {
     origin: allowedOrigins?.length ? allowedOrigins : [],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Authorization', 'Content-Type', 'X-Requested-With', 'Accept', 'Origin'],
+    allowedHeaders: [
+      'Authorization',
+      'Content-Type',
+      'X-Requested-With',
+      'Accept',
+      'Origin',
+    ],
   });
 
-  console.log('CORS allowed origins:', allowedOrigins?.length ? allowedOrigins : 'none (CORS_ORIGIN not set)');
+  console.log(
+    'CORS allowed origins:',
+    allowedOrigins?.length ? allowedOrigins : 'none (CORS_ORIGIN not set)',
+  );
 
   const port = process.env.PORT ?? 4000;
   await app.listen(port);
