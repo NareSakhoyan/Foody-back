@@ -25,11 +25,6 @@ async function bootstrap() {
     ],
   });
 
-  console.log(
-    'CORS allowed origins:',
-    allowedOrigins?.length ? allowedOrigins : 'none (CORS_ORIGIN not set)',
-  );
-
   const port = process.env.PORT ?? 4000;
   await app.listen(port);
   console.log(`Server running on port ${port}`);

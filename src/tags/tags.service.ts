@@ -47,11 +47,7 @@ export class TagsService {
 
   async upsert(names: string[], db: DbOrTx = this.db) {
     const uniqueNames = Array.from(
-      new Set(
-        names
-          .map((n) => n.trim())
-          .filter(Boolean),
-      ),
+      new Set(names.map((n) => n.trim()).filter(Boolean)),
     );
 
     if (uniqueNames.length === 0) {

@@ -12,10 +12,9 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 - `id` (uuid), `name`, `slug`, `shortDescription`, `imageUrl`
 - `prepDescription`, `cookDescription`
 - `prepTimeMinutes`, `cookTimeMinutes`, `servings`
-- `ingredients` (array of `{ name, quantity, measureUnit, note? }`)
+- `ingredients` (array of `{ name, quantity, measureUnit, note? }`), `spices` (string array)
 - `tags` (string array), `isPublic` (boolean), `status` (`draft | published | archived`)
 - `authorId` (internal user id), `createdAt`, `updatedAt`
-- `steps` is currently not collected; it is stored as `null`.
 - Responses from list endpoints include `author: { id, name, imageUrl }`.
 - Favorites: users can mark recipes as favorites; stored in `recipe_favorites` (unique per user/recipe).
 - Tags are stored both on the recipe row and in separate `tags` / `recipe_tags` tables; recipe creation upserts tags and links them.
@@ -25,6 +24,7 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 - `GET /recipes` — Public list of recipes. If the auth header is provided, also includes the caller’s private recipes. Sorted by `updatedAt` desc. Returns author info with each recipe. Query: `page`, `pageSize`, `q` (search name/shortDescription), `tag`, `status`, `authorId`.
 - `GET /recipes/mine` — Auth required. Lists only the caller’s recipes, sorted by `updatedAt` desc, with author info. Query: `page`, `pageSize`, `q`, `tag`, `status`.
 - `GET /recipes/favorites` — Auth required. Lists the caller’s favorited recipes, sorted by `updatedAt`. Query: `page`, `pageSize`, `q`, `tag`, `status`.
+- `GET /recipes/recommendations` — Auth required. Uses the caller’s pantry items to recommend recipes with ingredient matches. Query: `limit`, `q`, `tag`, `status`.
 - `GET /recipes/:id` — Public if the recipe is `isPublic`; otherwise requires the author. Returns the recipe.
 - `POST /recipes/:id/favorite` — Auth required. Adds the recipe to the caller’s favorites (no-op if already favorited).
 - `POST /recipes` — Auth required. Creates a recipe. Required body: `name`, `slug`, `ingredients`. Optional: `shortDescription`, `imageUrl`, `prepDescription`, `cookDescription`, `prepTimeMinutes`, `cookTimeMinutes`, `servings`, `tags`, `isPublic`, `status`.
@@ -43,12 +43,20 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 
 - `GET /tags` — Public. Returns all tags (sorted by name).
 
+## Pantry Endpoints
+
+- `GET /pantry` — Auth required. Lists pantry items for the caller (finished items are included with `isFinished` flag).
+- `POST /pantry` — Auth required. Create or update an item. Body: `name` (required on create), optional `quantity`, `isFinished`, `id` to update.
+- `DELETE /pantry/:id` — Auth required. Marks the item as finished; pass `?hard=true` to delete.
+
 ## Service Function Notes
 
 - `getAll` (recipes.service) — Builds visibility based on auth, joins author, supports pagination/search/tag/status filters, orders by `updatedAt`.
 - `getMine` — Filters by caller’s `authorId`, supports pagination/search/tag/status, returns author info, sorted by `updatedAt`.
 - `getFavorites` — Returns the caller’s favorites with author info, supports pagination/search/tag/status, sorted by `updatedAt`.
+- `getRecommendations` — Uses pantry items to score recipes by ingredient overlap (substring + fuzzy `pg_trgm`), sorted by match ratio and count.
 - `TagsService.getAll` — Returns all tags sorted by name.
+- `PantryService` — Parses auth, lists/creates/updates pantry items, marks items finished (or deletes when requested).
 - `addFavorite` / `removeFavorite` — Add/remove a recipe to/from the caller’s favorites. Requires auth.
 - `getOne` — Permits public access when `isPublic`; otherwise enforces author ownership.
 - `create` — Validates `name`, `slug`, `ingredients`; rejects duplicate slugs; stores `steps` as `null`.

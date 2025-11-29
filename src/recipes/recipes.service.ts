@@ -6,7 +6,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { DRIZZLE, schema } from '../db/db.module';
 import type { DrizzleDb } from '../db/db.module';
 import type { Ingredient } from '../db/schema';
@@ -27,6 +27,12 @@ type PaginatedRecipes = {
   page: number;
   pageSize: number;
   total: number;
+};
+type RecommendedRecipe = RecipeWithAuthor & {
+  matchCount: number;
+  matchRatio: number;
+  matchedIngredients: string[];
+  missingIngredients: string[];
 };
 
 export type CreateRecipeInput = {
@@ -60,6 +66,8 @@ export class RecipesService {
     @Inject(DRIZZLE) private readonly db: DrizzleDb,
     private readonly tagsService: TagsService,
   ) {}
+
+  private pgTrgmEnsured = false;
 
   async getAll(
     authHeader: string | undefined,
@@ -177,6 +185,137 @@ export class RecipesService {
       pageSize,
       total: Number(count),
     };
+  }
+
+  async getRecommendations(
+    authHeader: string | undefined,
+    params?: {
+      limit?: string | number;
+      q?: string;
+      tag?: string;
+      status?: string;
+    },
+  ): Promise<RecommendedRecipe[]> {
+    const user = await this.getUserFromAuth(authHeader);
+    const limit = this.normalizeLimit(params?.limit);
+    const conditions = this.buildRecommendationConditions(user.id, params);
+    await this.ensurePgTrgmExtension();
+    const whereClause =
+      conditions.length > 0
+        ? sql`where ${sql.join(conditions, sql` and `)}`
+        : sql``;
+
+    const { rows: scoredRows } = await this.db.execute(sql`
+      with pantry as (
+        select distinct lower(trim(name)) as token
+        from ${schema.pantryItems}
+        where ${schema.pantryItems.userId} = ${user.id}
+          and ${schema.pantryItems.isFinished} = false
+          and ${schema.pantryItems.name} is not null
+      ),
+      visible as (
+        select ${schema.recipes.id} as id, ${schema.recipes.ingredients} as ingredients
+        from ${schema.recipes}
+        inner join ${schema.users}
+          on ${schema.users.id} = ${schema.recipes.authorId}
+        ${whereClause}
+      ),
+      recipe_ing as (
+        select v.id, jsonb_array_elements(v.ingredients) ->> 'name' as ing
+        from visible v
+      ),
+      scored as (
+        select
+          ri.id,
+          count(*) as total_ingredients,
+          count(*) filter (
+            where exists (
+              select 1
+              from pantry p
+              where ri.ing ilike '%' || p.token || '%'
+                 or p.token ilike '%' || ri.ing || '%'
+                 or similarity(ri.ing, p.token) >= 0.35
+            )
+          ) as match_count,
+          array_agg(distinct ri.ing) filter (
+            where exists (
+              select 1
+              from pantry p
+              where ri.ing ilike '%' || p.token || '%'
+                 or p.token ilike '%' || ri.ing || '%'
+                 or similarity(ri.ing, p.token) >= 0.35
+            )
+          ) as matched_ingredients,
+          array_agg(distinct ri.ing) filter (
+            where not exists (
+              select 1
+              from pantry p
+              where ri.ing ilike '%' || p.token || '%'
+                 or p.token ilike '%' || ri.ing || '%'
+                 or similarity(ri.ing, p.token) >= 0.35
+            )
+          ) as missing_ingredients
+        from recipe_ing ri
+        group by ri.id
+      )
+      select
+        s.id,
+        s.match_count,
+        s.total_ingredients,
+        (s.match_count::numeric / nullif(s.total_ingredients, 0)) as match_ratio,
+        coalesce(s.matched_ingredients, '{}') as matched_ingredients,
+        coalesce(s.missing_ingredients, '{}') as missing_ingredients
+      from scored s
+      where s.match_count > 0
+      order by match_ratio desc, s.match_count desc, s.id
+      limit ${limit};
+    `);
+
+    const scoreRows = (scoredRows as any[]) ?? [];
+    if (scoreRows.length === 0) {
+      return [];
+    }
+
+    const recipeIds = scoreRows.map((row) => row.id as string);
+
+    const recipes = await this.db
+      .select({
+        recipe: schema.recipes,
+        author: {
+          id: schema.users.id,
+          name: schema.users.name,
+          imageUrl: schema.users.imageUrl,
+        },
+      })
+      .from(schema.recipes)
+      .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
+      .where(inArray(schema.recipes.id, recipeIds));
+
+    const tagsMap = await this.tagsService.getTagsForRecipeIds(recipeIds);
+    const recipeMap = new Map(
+      recipes.map((row) => [row.recipe.id, row] as const),
+    );
+
+    return scoreRows
+      .map((row) => {
+        const data = recipeMap.get(row.id);
+        if (!data) {
+          return null;
+        }
+        const matchCount = Number(row.match_count ?? 0);
+        const matchRatio = Number(row.match_ratio ?? 0);
+        const matchedIngredients = (row.matched_ingredients as string[]) ?? [];
+        const missingIngredients = (row.missing_ingredients as string[]) ?? [];
+
+        return {
+          ...this.mapRecipeWithAuthor(data, tagsMap),
+          matchCount,
+          matchRatio,
+          matchedIngredients,
+          missingIngredients,
+        };
+      })
+      .filter(Boolean) as RecommendedRecipe[];
   }
 
   async addFavorite(
@@ -533,6 +672,70 @@ export class RecipesService {
       page: pageNum < 1 ? 1 : pageNum,
       pageSize: pageSizeNum < 1 ? 20 : Math.min(pageSizeNum, 100),
     };
+  }
+
+  private normalizeLimit(limit?: string | number) {
+    const num = Number(limit) || 5;
+    if (Number.isNaN(num) || num < 1) {
+      return 5;
+    }
+    return Math.min(num, 20);
+  }
+
+  private async ensurePgTrgmExtension() {
+    if (this.pgTrgmEnsured) {
+      return;
+    }
+
+    await this.db.execute(sql`create extension if not exists pg_trgm`);
+    this.pgTrgmEnsured = true;
+  }
+
+  private buildRecommendationConditions(
+    userId: number,
+    params?: {
+      q?: string;
+      tag?: string;
+      status?: string;
+      authorId?: string | number;
+    },
+  ) {
+    const conditions: any[] = [
+      sql`${schema.users.isDeleted} = false`,
+      sql`(${schema.recipes.isPublic} = true or ${schema.recipes.authorId} = ${userId})`,
+    ];
+
+    if (params?.authorId) {
+      conditions.push(
+        sql`${schema.recipes.authorId} = ${Number(params.authorId)}`,
+      );
+    }
+
+    if (params?.status) {
+      conditions.push(sql`${schema.recipes.status} = ${params.status}`);
+    }
+
+    if (params?.q) {
+      const like = `%${params.q}%`;
+      conditions.push(
+        sql`(${schema.recipes.name} ilike ${like} or ${schema.recipes.shortDescription} ilike ${like})`,
+      );
+    }
+
+    if (params?.tag) {
+      const numericTagId = Number(params.tag);
+      if (!Number.isNaN(numericTagId)) {
+        conditions.push(
+          sql`${schema.recipes.id} in (select ${schema.recipeTags.recipeId} from ${schema.recipeTags} where ${schema.recipeTags.tagId} = ${numericTagId})`,
+        );
+      } else {
+        conditions.push(
+          sql`${schema.recipes.id} in (select ${schema.recipeTags.recipeId} from ${schema.recipeTags} join ${schema.tags} on ${schema.tags.id} = ${schema.recipeTags.tagId} where ${schema.tags.name} = ${params.tag})`,
+        );
+      }
+    }
+
+    return conditions;
   }
 
   private buildRecipeFilters(

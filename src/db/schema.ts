@@ -126,3 +126,20 @@ export const recipeFavorites = pgTable(
     ),
   }),
 );
+
+export const pantryItems = pgTable('pantry_items', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  name: varchar('name', { length: 200 }).notNull(),
+  quantity: varchar('quantity', { length: 200 }),
+  isFinished: boolean('is_finished').notNull().default(false),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .defaultNow()
+    .$onUpdate(() => new Date())
+    .notNull(),
+});

@@ -66,6 +66,20 @@ export class RecipesController {
     return this.recipesService.getFavorites(authHeader, query);
   }
 
+  @Get('recommendations')
+  getRecommendations(
+    @AuthHeader() authHeader: string | undefined,
+    @Query()
+    query: {
+      limit?: string;
+      q?: string;
+      tag?: string;
+      status?: string;
+    },
+  ) {
+    return this.recipesService.getRecommendations(authHeader, query);
+  }
+
   @Get(':id')
   getOne(
     @Param('id', ParseUUIDPipe) id: string,
