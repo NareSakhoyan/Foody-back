@@ -6,17 +6,28 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { and, desc, eq, or } from 'drizzle-orm';
+import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { DRIZZLE, schema } from '../db/db.module';
 import type { DrizzleDb } from '../db/db.module';
 import type { Ingredient } from '../db/schema';
+import { TagsService, type TagInfo } from '../tags/tags.service';
 
 type RecipeRow = typeof schema.recipes.$inferSelect;
 type AuthorInfo = Pick<
   typeof schema.users.$inferSelect,
   'id' | 'name' | 'imageUrl'
 >;
-type RecipeWithAuthor = RecipeRow & { author: AuthorInfo };
+type RecipeWithAuthor = Omit<RecipeRow, 'tags'> & {
+  tags: TagInfo[];
+  tagIds: number[];
+  author: AuthorInfo;
+};
+type PaginatedRecipes = {
+  items: RecipeWithAuthor[];
+  page: number;
+  pageSize: number;
+  total: number;
+};
 
 export type CreateRecipeInput = {
   name: string;
@@ -29,6 +40,7 @@ export type CreateRecipeInput = {
   cookTimeMinutes?: number | null;
   servings?: number | null;
   ingredients: Ingredient[];
+  spices?: string[];
   tags?: string[];
   isPublic?: boolean;
   status?: 'draft' | 'published' | 'archived';
@@ -44,16 +56,34 @@ export type UpdateRecipeInput = Partial<
 
 @Injectable()
 export class RecipesService {
-  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DRIZZLE) private readonly db: DrizzleDb,
+    private readonly tagsService: TagsService,
+  ) {}
 
-  async getAll(authHeader?: string): Promise<RecipeWithAuthor[]> {
+  async getAll(
+    authHeader: string | undefined,
+    params?: {
+      page?: string | number;
+      pageSize?: string | number;
+      q?: string;
+      tag?: string;
+      status?: string;
+      authorId?: string | number;
+    },
+  ): Promise<PaginatedRecipes> {
     const user = await this.getUserFromOptionalAuth(authHeader);
+    const { page, pageSize } = this.normalizePagination(params);
+    const filters = this.buildRecipeFilters(params, user?.id);
     const visibility = user
       ? or(
           eq(schema.recipes.isPublic, true),
           eq(schema.recipes.authorId, user.id),
         )
       : eq(schema.recipes.isPublic, true);
+
+    const whereClause =
+      filters.length > 0 ? and(visibility, ...filters) : visibility;
 
     const rows = await this.db
       .select({
@@ -66,14 +96,46 @@ export class RecipesService {
       })
       .from(schema.recipes)
       .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
-      .where(and(eq(schema.users.isDeleted, false), visibility))
-      .orderBy(desc(schema.recipes.updatedAt));
+      .where(and(eq(schema.users.isDeleted, false), whereClause))
+      .orderBy(desc(schema.recipes.updatedAt))
+      .limit(pageSize)
+      .offset((page - 1) * pageSize);
 
-    return rows.map((row) => this.mapRecipeWithAuthor(row));
+    const tagsMap = await this.tagsService.getTagsForRecipeIds(
+      rows.map((r) => r.recipe.id),
+    );
+
+    const [{ count }] = await this.db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.recipes)
+      .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
+      .where(and(eq(schema.users.isDeleted, false), whereClause));
+
+    return {
+      items: rows.map((row) => this.mapRecipeWithAuthor(row, tagsMap)),
+      page,
+      pageSize,
+      total: Number(count),
+    };
   }
 
-  async getFavorites(authHeader?: string): Promise<RecipeWithAuthor[]> {
+  async getFavorites(
+    authHeader?: string,
+    params?: {
+      page?: string | number;
+      pageSize?: string | number;
+      q?: string;
+      tag?: string;
+      status?: string;
+    },
+  ): Promise<PaginatedRecipes> {
     const user = await this.getUserFromAuth(authHeader);
+    const { page, pageSize } = this.normalizePagination(params);
+    const filters = this.buildRecipeFilters(params, undefined);
+    const whereClause =
+      filters.length > 0
+        ? and(eq(schema.recipeFavorites.userId, user.id), ...filters)
+        : eq(schema.recipeFavorites.userId, user.id);
 
     const rows = await this.db
       .select({
@@ -90,15 +152,31 @@ export class RecipesService {
         eq(schema.recipes.id, schema.recipeFavorites.recipeId),
       )
       .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
-      .where(
-        and(
-          eq(schema.recipeFavorites.userId, user.id),
-          eq(schema.users.isDeleted, false),
-        ),
-      )
-      .orderBy(desc(schema.recipes.updatedAt));
+      .where(and(eq(schema.users.isDeleted, false), whereClause))
+      .orderBy(desc(schema.recipes.updatedAt))
+      .limit(pageSize)
+      .offset((page - 1) * pageSize);
 
-    return rows.map((row) => this.mapRecipeWithAuthor(row));
+    const tagsMap = await this.tagsService.getTagsForRecipeIds(
+      rows.map((r) => r.recipe.id),
+    );
+
+    const [{ count }] = await this.db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.recipeFavorites)
+      .innerJoin(
+        schema.recipes,
+        eq(schema.recipes.id, schema.recipeFavorites.recipeId),
+      )
+      .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
+      .where(and(eq(schema.users.isDeleted, false), whereClause));
+
+    return {
+      items: rows.map((row) => this.mapRecipeWithAuthor(row, tagsMap)),
+      page,
+      pageSize,
+      total: Number(count),
+    };
   }
 
   async addFavorite(
@@ -139,8 +217,19 @@ export class RecipesService {
     return { favorited: false };
   }
 
-  async getMine(authHeader?: string): Promise<RecipeWithAuthor[]> {
+  async getMine(
+    authHeader?: string,
+    params?: {
+      page?: string | number;
+      pageSize?: string | number;
+      q?: string;
+      tag?: string;
+      status?: string;
+    },
+  ): Promise<PaginatedRecipes> {
     const user = await this.getUserFromAuth(authHeader);
+    const { page, pageSize } = this.normalizePagination(params);
+    const filters = this.buildRecipeFilters(params, user.id, true);
 
     const rows = await this.db
       .select({
@@ -153,26 +242,56 @@ export class RecipesService {
       })
       .from(schema.recipes)
       .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
-      .where(
-        and(
-          eq(schema.recipes.authorId, user.id),
-          eq(schema.users.isDeleted, false),
-        ),
-      )
-      .orderBy(desc(schema.recipes.updatedAt));
+      .where(and(eq(schema.users.isDeleted, false), ...filters))
+      .orderBy(desc(schema.recipes.updatedAt))
+      .limit(pageSize)
+      .offset((page - 1) * pageSize);
 
-    return rows.map((row) => this.mapRecipeWithAuthor(row));
+    const tagsMap = await this.tagsService.getTagsForRecipeIds(
+      rows.map((r) => r.recipe.id),
+    );
+
+    const [{ count }] = await this.db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.recipes)
+      .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
+      .where(and(eq(schema.users.isDeleted, false), ...filters));
+
+    return {
+      items: rows.map((row) => this.mapRecipeWithAuthor(row, tagsMap)),
+      page,
+      pageSize,
+      total: Number(count),
+    };
   }
 
   async getOne(id: string, authHeader?: string) {
     const user = authHeader ? await this.getUserFromAuth(authHeader) : null;
-    const recipe = await this.findRecipeOrThrow(id);
 
-    if (!recipe.isPublic && (!user || recipe.authorId !== user.id)) {
+    const [row] = await this.db
+      .select({
+        recipe: schema.recipes,
+        author: {
+          id: schema.users.id,
+          name: schema.users.name,
+          imageUrl: schema.users.imageUrl,
+        },
+      })
+      .from(schema.recipes)
+      .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
+      .where(eq(schema.recipes.id, id));
+
+    if (!row) {
+      throw new NotFoundException('Recipe not found');
+    }
+
+    if (!row.recipe.isPublic && (!user || row.recipe.authorId !== user.id)) {
       throw new ForbiddenException('You cannot view this recipe');
     }
 
-    return recipe;
+    const tagsMap = await this.tagsService.getTagsForRecipeIds([row.recipe.id]);
+
+    return this.mapRecipeWithAuthor(row, tagsMap);
   }
 
   async create(authHeader: string | undefined, input: CreateRecipeInput) {
@@ -180,37 +299,61 @@ export class RecipesService {
 
     this.validateCreate(input);
 
-    const [existingSlug] = await this.db
-      .select()
-      .from(schema.recipes)
-      .where(eq(schema.recipes.slug, input.slug));
+    const result = await this.db.transaction(async (tx) => {
+      const [existingSlug] = await tx
+        .select()
+        .from(schema.recipes)
+        .where(eq(schema.recipes.slug, input.slug));
 
-    if (existingSlug) {
-      throw new BadRequestException('Slug already in use');
-    }
+      if (existingSlug) {
+        throw new BadRequestException('Slug already in use');
+      }
 
-    const [recipe] = await this.db
-      .insert(schema.recipes)
-      .values({
-        authorId: user.id,
-        name: input.name,
-        slug: input.slug,
-        shortDescription: input.shortDescription ?? null,
-        imageUrl: input.imageUrl ?? null,
-        prepDescription: input.prepDescription ?? null,
-        cookDescription: input.cookDescription ?? null,
-        steps: null,
-        prepTimeMinutes: input.prepTimeMinutes ?? null,
-        cookTimeMinutes: input.cookTimeMinutes ?? null,
-        servings: input.servings ?? null,
-        ingredients: input.ingredients,
-        tags: input.tags ?? [],
-        isPublic: input.isPublic ?? true,
-        status: input.status ?? 'draft',
-      })
-      .returning();
+      const [recipe] = await tx
+        .insert(schema.recipes)
+        .values({
+          authorId: user.id,
+          name: input.name,
+          slug: input.slug,
+          shortDescription: input.shortDescription ?? null,
+          imageUrl: input.imageUrl ?? null,
+          prepDescription: input.prepDescription ?? null,
+          cookDescription: input.cookDescription ?? null,
+          prepTimeMinutes: input.prepTimeMinutes ?? null,
+          cookTimeMinutes: input.cookTimeMinutes ?? null,
+          servings: input.servings ?? null,
+          ingredients: input.ingredients,
+          spices: input.spices ?? [],
+          tags: input.tags ?? [],
+          isPublic: input.isPublic ?? true,
+          status: input.status ?? 'draft',
+        })
+        .returning();
 
-    return recipe;
+      const tagNames = input.tags ?? [];
+      if (tagNames.length > 0) {
+        await this.tagsService.upsert(tagNames, tx);
+        const rows = await this.tagsService.findByNames(tagNames, tx);
+
+        if (rows.length > 0) {
+          const links = rows.map((tag) => ({
+            recipeId: recipe.id,
+            tagId: tag.id,
+          }));
+
+          await tx
+            .insert(schema.recipeTags)
+            .values(links)
+            .onConflictDoNothing({
+              target: [schema.recipeTags.recipeId, schema.recipeTags.tagId],
+            });
+        }
+      }
+
+      return recipe;
+    });
+
+    return result;
   }
 
   async update(
@@ -252,6 +395,7 @@ export class RecipesService {
         cookTimeMinutes: input.cookTimeMinutes ?? recipe.cookTimeMinutes,
         servings: input.servings ?? recipe.servings,
         ingredients: input.ingredients ?? recipe.ingredients,
+        spices: input.spices ?? recipe.spices,
         tags: input.tags ?? recipe.tags,
         isPublic: input.isPublic ?? recipe.isPublic,
         status: input.status ?? recipe.status,
@@ -359,17 +503,85 @@ export class RecipesService {
     return recipe;
   }
 
-  private mapRecipeWithAuthor(row: {
-    recipe: RecipeRow;
-    author: AuthorInfo;
-  }): RecipeWithAuthor {
+  private mapRecipeWithAuthor(
+    row: {
+      recipe: RecipeRow;
+      author: AuthorInfo;
+    },
+    tagMap: Map<string, TagInfo[]>,
+  ): RecipeWithAuthor {
+    const tags = tagMap.get(row.recipe.id) ?? [];
     return {
       ...row.recipe,
+      tags,
+      tagIds: tags.map((t) => t.id),
       author: {
         id: row.author.id,
         name: row.author.name,
         imageUrl: row.author.imageUrl,
       },
     };
+  }
+
+  private normalizePagination(params?: {
+    page?: string | number;
+    pageSize?: string | number;
+  }) {
+    const pageNum = Number(params?.page) || 1;
+    const pageSizeNum = Number(params?.pageSize) || 20;
+    return {
+      page: pageNum < 1 ? 1 : pageNum,
+      pageSize: pageSizeNum < 1 ? 20 : Math.min(pageSizeNum, 100),
+    };
+  }
+
+  private buildRecipeFilters(
+    params:
+      | {
+          q?: string;
+          tag?: string;
+          status?: string;
+          authorId?: string | number;
+        }
+      | undefined,
+    callerId?: number,
+    forceAuthor?: boolean,
+  ) {
+    const conditions: any[] = [];
+
+    if (forceAuthor && callerId) {
+      conditions.push(eq(schema.recipes.authorId, callerId));
+    } else if (params?.authorId) {
+      conditions.push(eq(schema.recipes.authorId, Number(params.authorId)));
+    }
+
+    if (params?.status) {
+      conditions.push(eq(schema.recipes.status, params.status));
+    }
+
+    if (params?.q) {
+      const like = `%${params.q}%`;
+      conditions.push(
+        or(
+          ilike(schema.recipes.name, like),
+          ilike(schema.recipes.shortDescription, like),
+        ),
+      );
+    }
+
+    if (params?.tag) {
+      const numericTagId = Number(params.tag);
+      if (!Number.isNaN(numericTagId)) {
+        conditions.push(
+          sql`${schema.recipes.id} IN (select ${schema.recipeTags.recipeId} from ${schema.recipeTags} where ${schema.recipeTags.tagId} = ${numericTagId})`,
+        );
+      } else {
+        conditions.push(
+          sql`${schema.recipes.id} IN (select ${schema.recipeTags.recipeId} from ${schema.recipeTags} join ${schema.tags} on ${schema.tags.id} = ${schema.recipeTags.tagId} where ${schema.tags.name} = ${params.tag})`,
+        );
+      }
+    }
+
+    return conditions;
   }
 }

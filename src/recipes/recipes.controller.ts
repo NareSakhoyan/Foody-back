@@ -7,6 +7,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { AuthHeader } from '../common/auth-header.decorator';
 import {
@@ -20,18 +21,49 @@ export class RecipesController {
   constructor(private readonly recipesService: RecipesService) {}
 
   @Get()
-  getAll(@AuthHeader() authHeader?: string) {
-    return this.recipesService.getAll(authHeader);
+  getAll(
+    @AuthHeader() authHeader: string | undefined,
+    @Query()
+    query: {
+      page?: string;
+      pageSize?: string;
+      q?: string;
+      tag?: string;
+      status?: string;
+      authorId?: string;
+    },
+  ) {
+    return this.recipesService.getAll(authHeader, query);
   }
 
   @Get('mine')
-  getMine(@AuthHeader() authHeader?: string) {
-    return this.recipesService.getMine(authHeader);
+  getMine(
+    @AuthHeader() authHeader: string | undefined,
+    @Query()
+    query: {
+      page?: string;
+      pageSize?: string;
+      q?: string;
+      tag?: string;
+      status?: string;
+    },
+  ) {
+    return this.recipesService.getMine(authHeader, query);
   }
 
   @Get('favorites')
-  getFavorites(@AuthHeader() authHeader?: string) {
-    return this.recipesService.getFavorites(authHeader);
+  getFavorites(
+    @AuthHeader() authHeader: string | undefined,
+    @Query()
+    query: {
+      page?: string;
+      pageSize?: string;
+      q?: string;
+      tag?: string;
+      status?: string;
+    },
+  ) {
+    return this.recipesService.getFavorites(authHeader, query);
   }
 
   @Get(':id')

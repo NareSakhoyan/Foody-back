@@ -15,6 +15,20 @@
       "when": 1764160000000,
       "tag": "0001_recipe_favorites",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1764160500000,
+      "tag": "0002_tags",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1737066930000,
+      "tag": "0003_spices",
+      "breakpoints": true
     }
   ]
 }
