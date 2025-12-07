@@ -2,6 +2,10 @@
 
 Small NestJS + Drizzle API for recipes and users. This document lists the available endpoints and what each service function does at a high level.
 
+## Root
+
+- `GET /` — Public. Returns a simple hello string.
+
 ## Auth
 
 - Uses a bearer token (`Authorization: Bearer <jwt>`) whose payload includes `sub` as the Clerk user id.
@@ -34,7 +38,7 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 
 ## Users Endpoints (brief)
 
-- `GET /users/me` — Auth required. Returns the current user.
+- `GET /me` — Auth required. Returns the current user.
 - `POST /users` — Upserts a user from Clerk data (`clerkId`, `email`, optional `name`, `imageUrl`).
 - `PATCH /users/:id` — Updates `name`/`imageUrl`.
 - `DELETE /users/:id` — Soft deletes the user.
@@ -47,7 +51,16 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 
 - `GET /pantry` — Auth required. Lists pantry items for the caller (finished items are included with `isFinished` flag).
 - `POST /pantry` — Auth required. Create or update an item. Body: `name` (required on create), optional `quantity`, `isFinished`, `id` to update.
+- `DELETE /pantry/items` — Auth required. Bulk delete by status. Query: `status=active|finished` (required). Returns `{ deletedCount }`.
 - `DELETE /pantry/:id` — Auth required. Marks the item as finished; pass `?hard=true` to delete.
+
+## Shopping List Endpoints
+
+- `GET /shopping-list` — Auth required. Lists the caller’s shopping list items, ordered with unpurchased items first.
+- `POST /shopping-list` — Auth required. Creates an item; body: `name` (required), optional `quantity`, `notes`, `isPurchased`. Automatically merges with an existing active item of the same name; if created as purchased, it is also added to the pantry (merging quantities).
+- `PATCH /shopping-list/:id` — Auth required. Updates an item; body may include `name`, `quantity`, `notes`, `isPurchased` (payload cannot be empty). Marking `isPurchased=true` also adds it to the pantry.
+- `DELETE /shopping-list/items` — Auth required. Deletes purchased items. Query: `status=purchased` (required). Returns `{ deletedCount }`.
+- `DELETE /shopping-list/:id` — Auth required. Deletes a single shopping list item for the caller.
 
 ## Service Function Notes
 
@@ -56,7 +69,8 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 - `getFavorites` — Returns the caller’s favorites with author info, supports pagination/search/tag/status, sorted by `updatedAt`.
 - `getRecommendations` — Uses pantry items to score recipes by ingredient overlap (substring + fuzzy `pg_trgm`), sorted by match ratio and count.
 - `TagsService.getAll` — Returns all tags sorted by name.
-- `PantryService` — Parses auth, lists/creates/updates pantry items, marks items finished (or deletes when requested).
+- `PantryService` — Parses auth, lists/creates/updates pantry items, supports bulk deletion by status, and finishes items by merging into existing finished entries unless `hard=true` deletes.
+- `ShoppingListService` — Parses auth, merges duplicate items (case-insensitive) and quantities, updates/deletes items, and when items are marked purchased they are added to the pantry with quantity merging.
 - `addFavorite` / `removeFavorite` — Add/remove a recipe to/from the caller’s favorites. Requires auth.
 - `getOne` — Permits public access when `isPublic`; otherwise enforces author ownership.
 - `create` — Validates `name`, `slug`, `ingredients`; rejects duplicate slugs; stores `steps` as `null`.
