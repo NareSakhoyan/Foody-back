@@ -43,6 +43,13 @@
       "when": 1737069000000,
       "tag": "0005_recommendation_perf",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1737070000000,
+      "tag": "0006_pantry_name_trgm",
+      "breakpoints": true
     }
   ]
 }

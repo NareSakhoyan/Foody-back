@@ -11,6 +11,7 @@ import { DRIZZLE, schema } from '../db/db.module';
 import type { DrizzleDb } from '../db/db.module';
 import type { Ingredient } from '../db/schema';
 import { TagsService, type TagInfo } from '../tags/tags.service';
+import { buildRecommendationScoreQuery } from './sql/recommendations';
 
 type RecipeRow = typeof schema.recipes.$inferSelect;
 type AuthorInfo = Pick<
@@ -33,6 +34,14 @@ type RecommendedRecipe = RecipeWithAuthor & {
   matchRatio: number;
   matchedIngredients: string[];
   missingIngredients: string[];
+};
+type ScoreRow = {
+  id: string;
+  match_count: number | null;
+  total_ingredients: number | null;
+  match_ratio: string | number | null;
+  matched_ingredients: string[] | null;
+  missing_ingredients: string[] | null;
 };
 
 export type CreateRecipeInput = {
@@ -205,73 +214,17 @@ export class RecipesService {
         ? sql`where ${sql.join(conditions, sql` and `)}`
         : sql``;
 
-    const { rows: scoredRows } = await this.db.execute(sql`
-      with pantry as (
-        select distinct lower(trim(name)) as token
-        from ${schema.pantryItems}
-        where ${schema.pantryItems.userId} = ${user.id}
-          and ${schema.pantryItems.isFinished} = false
-          and ${schema.pantryItems.name} is not null
-      ),
-      visible as (
-        select ${schema.recipes.id} as id, ${schema.recipes.ingredients} as ingredients
-        from ${schema.recipes}
-        inner join ${schema.users}
-          on ${schema.users.id} = ${schema.recipes.authorId}
-        ${whereClause}
-      ),
-      recipe_ing as (
-        select v.id, jsonb_array_elements(v.ingredients) ->> 'name' as ing
-        from visible v
-      ),
-      scored as (
-        select
-          ri.id,
-          count(*) as total_ingredients,
-          count(*) filter (
-            where exists (
-              select 1
-              from pantry p
-              where ri.ing ilike '%' || p.token || '%'
-                 or p.token ilike '%' || ri.ing || '%'
-                 or similarity(ri.ing, p.token) >= 0.35
-            )
-          ) as match_count,
-          array_agg(distinct ri.ing) filter (
-            where exists (
-              select 1
-              from pantry p
-              where ri.ing ilike '%' || p.token || '%'
-                 or p.token ilike '%' || ri.ing || '%'
-                 or similarity(ri.ing, p.token) >= 0.35
-            )
-          ) as matched_ingredients,
-          array_agg(distinct ri.ing) filter (
-            where not exists (
-              select 1
-              from pantry p
-              where ri.ing ilike '%' || p.token || '%'
-                 or p.token ilike '%' || ri.ing || '%'
-                 or similarity(ri.ing, p.token) >= 0.35
-            )
-          ) as missing_ingredients
-        from recipe_ing ri
-        group by ri.id
-      )
-      select
-        s.id,
-        s.match_count,
-        s.total_ingredients,
-        (s.match_count::numeric / nullif(s.total_ingredients, 0)) as match_ratio,
-        coalesce(s.matched_ingredients, '{}') as matched_ingredients,
-        coalesce(s.missing_ingredients, '{}') as missing_ingredients
-      from scored s
-      where s.match_count > 0
-      order by match_ratio desc, s.match_count desc, s.id
-      limit ${limit};
-    `);
+    const recommendationQuery = buildRecommendationScoreQuery({
+      userId: user.id,
+      limit,
+      whereClause,
+    });
 
-    const scoreRows = (scoredRows as any[]) ?? [];
+    const { rows: scoredRows } = (await this.db.execute(
+      recommendationQuery,
+    )) as { rows: ScoreRow[] };
+
+    const scoreRows = scoredRows ?? [];
     if (scoreRows.length === 0) {
       return [];
     }
@@ -521,26 +474,57 @@ export class RecipesService {
       }
     }
 
-    const [updated] = await this.db
-      .update(schema.recipes)
-      .set({
-        name: input.name ?? recipe.name,
-        slug: input.slug ?? recipe.slug,
-        shortDescription: input.shortDescription ?? recipe.shortDescription,
-        imageUrl: input.imageUrl ?? recipe.imageUrl,
-        prepDescription: input.prepDescription ?? recipe.prepDescription,
-        cookDescription: input.cookDescription ?? recipe.cookDescription,
-        prepTimeMinutes: input.prepTimeMinutes ?? recipe.prepTimeMinutes,
-        cookTimeMinutes: input.cookTimeMinutes ?? recipe.cookTimeMinutes,
-        servings: input.servings ?? recipe.servings,
-        ingredients: input.ingredients ?? recipe.ingredients,
-        spices: input.spices ?? recipe.spices,
-        tags: input.tags ?? recipe.tags,
-        isPublic: input.isPublic ?? recipe.isPublic,
-        status: input.status ?? recipe.status,
-      })
-      .where(eq(schema.recipes.id, recipe.id))
-      .returning();
+    const tagsToUpdate = input.tags;
+
+    const updated = await this.db.transaction(async (tx) => {
+      const [recipeRow] = await tx
+        .update(schema.recipes)
+        .set({
+          name: input.name ?? recipe.name,
+          slug: input.slug ?? recipe.slug,
+          shortDescription: input.shortDescription ?? recipe.shortDescription,
+          imageUrl: input.imageUrl ?? recipe.imageUrl,
+          prepDescription: input.prepDescription ?? recipe.prepDescription,
+          cookDescription: input.cookDescription ?? recipe.cookDescription,
+          prepTimeMinutes: input.prepTimeMinutes ?? recipe.prepTimeMinutes,
+          cookTimeMinutes: input.cookTimeMinutes ?? recipe.cookTimeMinutes,
+          servings: input.servings ?? recipe.servings,
+          ingredients: input.ingredients ?? recipe.ingredients,
+          spices: input.spices ?? recipe.spices,
+          tags: tagsToUpdate ?? recipe.tags,
+          isPublic: input.isPublic ?? recipe.isPublic,
+          status: input.status ?? recipe.status,
+        })
+        .where(eq(schema.recipes.id, recipe.id))
+        .returning();
+
+      if (tagsToUpdate !== undefined) {
+        await tx
+          .delete(schema.recipeTags)
+          .where(eq(schema.recipeTags.recipeId, recipe.id));
+
+        if (tagsToUpdate.length > 0) {
+          await this.tagsService.upsert(tagsToUpdate, tx);
+          const tagRows = await this.tagsService.findByNames(tagsToUpdate, tx);
+
+          if (tagRows.length > 0) {
+            await tx
+              .insert(schema.recipeTags)
+              .values(
+                tagRows.map((tag) => ({
+                  recipeId: recipe.id,
+                  tagId: tag.id,
+                })),
+              )
+              .onConflictDoNothing({
+                target: [schema.recipeTags.recipeId, schema.recipeTags.tagId],
+              });
+          }
+        }
+      }
+
+      return recipeRow;
+    });
 
     return updated;
   }
