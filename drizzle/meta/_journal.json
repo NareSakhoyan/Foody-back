@@ -50,6 +50,13 @@
       "when": 1737070000000,
       "tag": "0006_pantry_name_trgm",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1737071000000,
+      "tag": "0007_shopping_list_items",
+      "breakpoints": true
     }
   ]
 }

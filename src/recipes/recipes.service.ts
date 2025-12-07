@@ -226,7 +226,55 @@ export class RecipesService {
 
     const scoreRows = scoredRows ?? [];
     if (scoreRows.length === 0) {
-      return [];
+      const fallbackFilters = this.buildRecipeFilters(
+        params
+          ? {
+              q: params.q,
+              tag: params.tag,
+              status: params.status,
+            }
+          : undefined,
+        undefined,
+        false,
+      );
+      const visibility = or(
+        eq(schema.recipes.isPublic, true),
+        eq(schema.recipes.authorId, user.id),
+      );
+      const ingredientCount = sql<number>`jsonb_array_length(${schema.recipes.ingredients})`;
+
+      const fallbackRows = await this.db
+        .select({
+          recipe: schema.recipes,
+          author: {
+            id: schema.users.id,
+            name: schema.users.name,
+            imageUrl: schema.users.imageUrl,
+          },
+          ingredientCount,
+        })
+        .from(schema.recipes)
+        .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
+        .where(
+          and(eq(schema.users.isDeleted, false), visibility, ...fallbackFilters),
+        )
+        .orderBy(ingredientCount, desc(schema.recipes.updatedAt))
+        .limit(limit);
+
+      if (fallbackRows.length === 0) {
+        return [];
+      }
+
+      const recipeIds = fallbackRows.map((row) => row.recipe.id);
+      const tagsMap = await this.tagsService.getTagsForRecipeIds(recipeIds);
+
+      return fallbackRows.map((row) => ({
+        ...this.mapRecipeWithAuthor(row, tagsMap),
+        matchCount: 0,
+        matchRatio: 0,
+        matchedIngredients: [],
+        missingIngredients: [],
+      }));
     }
 
     const recipeIds = scoreRows.map((row) => row.id as string);

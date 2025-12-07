@@ -5,7 +5,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { DRIZZLE, schema } from '../db/db.module';
 import type { DrizzleDb } from '../db/db.module';
 
@@ -75,13 +75,65 @@ export class PantryService {
       return updated;
     }
 
+    const targetFinished = input.isFinished ?? false;
+    const matches = await this.db
+      .select()
+      .from(schema.pantryItems)
+      .where(
+        and(
+          eq(schema.pantryItems.userId, user.id),
+          eq(schema.pantryItems.isFinished, targetFinished),
+          sql`lower(${schema.pantryItems.name}) = lower(${trimmedName})`,
+        ),
+      );
+
+    if (matches.length > 0) {
+      const [primary, ...rest] = matches;
+      const mergedExisting = matches.reduce(
+        (acc, item) => this.mergeQuantities(acc, item.quantity),
+        null as string | null,
+      );
+      const mergedQuantity = this.mergeQuantities(
+        mergedExisting,
+        input.quantity?.trim() || null,
+      );
+
+      if (rest.length > 0) {
+        await this.db
+          .delete(schema.pantryItems)
+          .where(
+            and(
+              eq(schema.pantryItems.userId, user.id),
+              eq(schema.pantryItems.isFinished, targetFinished),
+              sql`lower(${schema.pantryItems.name}) = lower(${trimmedName})`,
+              inArray(
+                schema.pantryItems.id,
+                rest.map((item) => item.id),
+              ),
+            ),
+          );
+      }
+
+      const [updated] = await this.db
+        .update(schema.pantryItems)
+        .set({
+          name: trimmedName!,
+          quantity: mergedQuantity,
+          isFinished: targetFinished,
+        })
+        .where(eq(schema.pantryItems.id, primary.id))
+        .returning();
+
+      return updated;
+    }
+
     const [created] = await this.db
       .insert(schema.pantryItems)
       .values({
         userId: user.id,
         name: trimmedName!,
         quantity: input.quantity?.trim() || null,
-        isFinished: input.isFinished ?? false,
+        isFinished: targetFinished,
       })
       .returning();
 
@@ -139,13 +191,57 @@ export class PantryService {
       return deleted;
     }
 
-    const [finished] = await this.db
-      .update(schema.pantryItems)
-      .set({ isFinished: true })
-      .where(eq(schema.pantryItems.id, existing.id))
-      .returning();
+    return this.db.transaction(async (tx) => {
+      const finishedMatches = await tx
+        .select()
+        .from(schema.pantryItems)
+        .where(
+          and(
+            eq(schema.pantryItems.userId, user.id),
+            eq(schema.pantryItems.isFinished, true),
+            sql`lower(${schema.pantryItems.name}) = lower(${existing.name})`,
+          ),
+        );
 
-    return finished;
+      if (finishedMatches.length === 0) {
+        const [finished] = await tx
+          .update(schema.pantryItems)
+          .set({ isFinished: true })
+          .where(eq(schema.pantryItems.id, existing.id))
+          .returning();
+        return finished;
+      }
+
+      const mergedQuantity = finishedMatches
+        .concat(existing)
+        .reduce(
+          (acc, item) => this.mergeQuantities(acc, item.quantity),
+          null as string | null,
+        );
+
+      await tx.delete(schema.pantryItems).where(
+        and(
+          eq(schema.pantryItems.userId, user.id),
+          eq(schema.pantryItems.isFinished, true),
+          sql`lower(${schema.pantryItems.name}) = lower(${existing.name})`,
+          inArray(
+            schema.pantryItems.id,
+            finishedMatches.map((item) => item.id),
+          ),
+        ),
+      );
+
+      const [updated] = await tx
+        .update(schema.pantryItems)
+        .set({
+          quantity: mergedQuantity,
+          isFinished: true,
+        })
+        .where(eq(schema.pantryItems.id, existing.id))
+        .returning();
+
+      return updated;
+    });
   }
 
   async getActiveItemsForUser(userId: number) {
@@ -210,5 +306,48 @@ export class PantryService {
     } catch {
       throw new UnauthorizedException('Invalid bearer token payload');
     }
+  }
+
+  private mergeQuantities(
+    existingQuantity: string | null,
+    incomingQuantity: string | null,
+  ) {
+    const trimmedExisting = existingQuantity?.trim() || null;
+    const trimmedIncoming = incomingQuantity?.trim() || null;
+
+    if (!trimmedExisting) {
+      return trimmedIncoming;
+    }
+    if (!trimmedIncoming) {
+      return trimmedExisting;
+    }
+
+    const parseQuantity = (value: string) => {
+      const match = value.match(/^([0-9]+(?:\.[0-9]+)?)\s*(.*)$/);
+      if (!match) {
+        return { amount: NaN, unit: value.trim() };
+      }
+      return {
+        amount: Number(match[1]),
+        unit: match[2].trim(),
+      };
+    };
+
+    const existing = parseQuantity(trimmedExisting);
+    const incoming = parseQuantity(trimmedIncoming);
+
+    const bothNumeric =
+      Number.isFinite(existing.amount) && Number.isFinite(incoming.amount);
+    const unitMatches =
+      (existing.unit || '').toLowerCase() ===
+      (incoming.unit || '').toLowerCase();
+
+    if (bothNumeric && unitMatches) {
+      const total = existing.amount + incoming.amount;
+      const unit = existing.unit || incoming.unit;
+      return unit ? `${total} ${unit}` : `${total}`;
+    }
+
+    return trimmedIncoming;
   }
 }

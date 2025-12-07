@@ -143,3 +143,21 @@ export const pantryItems = pgTable('pantry_items', {
     .$onUpdate(() => new Date())
     .notNull(),
 });
+
+export const shoppingListItems = pgTable('shopping_list_items', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  name: varchar('name', { length: 200 }).notNull(),
+  quantity: varchar('quantity', { length: 200 }),
+  notes: text('notes'),
+  isPurchased: boolean('is_purchased').notNull().default(false),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .defaultNow()
+    .$onUpdate(() => new Date())
+    .notNull(),
+});

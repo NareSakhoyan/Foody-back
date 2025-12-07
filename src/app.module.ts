@@ -7,6 +7,7 @@ import { UsersModule } from './users/users.module';
 import { RecipesModule } from './recipes/recipes.module';
 import { TagsModule } from './tags/tags.module';
 import { PantryModule } from './pantry/pantry.module';
+import { ShoppingListModule } from './shopping-list/shopping-list.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { PantryModule } from './pantry/pantry.module';
     RecipesModule,
     TagsModule,
     PantryModule,
+    ShoppingListModule,
   ],
   controllers: [AppController],
   providers: [AppService],
