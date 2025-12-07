@@ -99,19 +99,17 @@ export class PantryService {
       );
 
       if (rest.length > 0) {
-        await this.db
-          .delete(schema.pantryItems)
-          .where(
-            and(
-              eq(schema.pantryItems.userId, user.id),
-              eq(schema.pantryItems.isFinished, targetFinished),
-              sql`lower(${schema.pantryItems.name}) = lower(${trimmedName})`,
-              inArray(
-                schema.pantryItems.id,
-                rest.map((item) => item.id),
-              ),
+        await this.db.delete(schema.pantryItems).where(
+          and(
+            eq(schema.pantryItems.userId, user.id),
+            eq(schema.pantryItems.isFinished, targetFinished),
+            sql`lower(${schema.pantryItems.name}) = lower(${trimmedName})`,
+            inArray(
+              schema.pantryItems.id,
+              rest.map((item) => item.id),
             ),
-          );
+          ),
+        );
       }
 
       const [updated] = await this.db

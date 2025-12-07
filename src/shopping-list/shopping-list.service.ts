@@ -214,10 +214,7 @@ export class ShoppingListService {
     return deleted;
   }
 
-  async deleteByStatus(
-    authHeader: string | undefined,
-    status?: 'purchased',
-  ) {
+  async deleteByStatus(authHeader: string | undefined, status?: 'purchased') {
     if (status !== 'purchased') {
       throw new BadRequestException('status must be purchased');
     }
@@ -327,7 +324,8 @@ export class ShoppingListService {
     const bothNumeric =
       Number.isFinite(existing.amount) && Number.isFinite(incoming.amount);
     const unitMatches =
-      (existing.unit || '').toLowerCase() === (incoming.unit || '').toLowerCase();
+      (existing.unit || '').toLowerCase() ===
+      (incoming.unit || '').toLowerCase();
 
     if (bothNumeric && unitMatches) {
       const total = existing.amount + incoming.amount;

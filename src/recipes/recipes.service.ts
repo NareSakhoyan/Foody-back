@@ -256,7 +256,11 @@ export class RecipesService {
         .from(schema.recipes)
         .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
         .where(
-          and(eq(schema.users.isDeleted, false), visibility, ...fallbackFilters),
+          and(
+            eq(schema.users.isDeleted, false),
+            visibility,
+            ...fallbackFilters,
+          ),
         )
         .orderBy(ingredientCount, desc(schema.recipes.updatedAt))
         .limit(limit);
