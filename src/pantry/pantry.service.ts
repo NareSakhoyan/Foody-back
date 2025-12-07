@@ -88,6 +88,28 @@ export class PantryService {
     return created;
   }
 
+  async deleteByStatus(
+    authHeader: string | undefined,
+    status?: 'active' | 'finished',
+  ) {
+    if (status !== 'active' && status !== 'finished') {
+      throw new BadRequestException('status must be active or finished');
+    }
+
+    const user = await this.getUserFromAuth(authHeader);
+    const deleted = await this.db
+      .delete(schema.pantryItems)
+      .where(
+        and(
+          eq(schema.pantryItems.userId, user.id),
+          eq(schema.pantryItems.isFinished, status === 'finished'),
+        ),
+      )
+      .returning();
+
+    return { deletedCount: deleted.length };
+  }
+
   async finishOrDelete(
     id: number,
     authHeader: string | undefined,

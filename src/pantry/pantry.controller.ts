@@ -20,6 +20,14 @@ export class PantryController {
     return this.pantryService.getAll(authHeader);
   }
 
+  @Delete('items')
+  deleteByStatus(
+    @Query('status') status: 'active' | 'finished' | undefined,
+    @AuthHeader() authHeader?: string,
+  ) {
+    return this.pantryService.deleteByStatus(authHeader, status);
+  }
+
   @Post()
   upsert(
     @AuthHeader() authHeader: string | undefined,
