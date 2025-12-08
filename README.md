@@ -62,6 +62,15 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 - `DELETE /shopping-list/items` — Auth required. Deletes purchased items. Query: `status=purchased` (required). Returns `{ deletedCount }`.
 - `DELETE /shopping-list/:id` — Auth required. Deletes a single shopping list item for the caller.
 
+## Meal Plans Endpoints
+
+- `GET /meal-plans/current?start=YYYY-MM-DD&end=YYYY-MM-DD` — Auth required. Returns the plan for the requested range plus its entries; if none exists, returns an empty plan stub with that range.
+- `POST /meal-plans` — Auth required. Creates a plan. Body: `startDate`, `endDate`, optional `title`.
+- `PUT /meal-plans/:id` — Auth required. Updates plan metadata (`title`, `startDate`, `endDate`) for the caller.
+- `PUT /meal-plans/:id/entries` — Auth required. Replaces the plan’s entries with the provided list (entries can include `id`, `day`, `recipeId`, optional `mealType`, `notes`, `sortOrder`).
+- `DELETE /meal-plans/:id/entries/:entryId` — Auth required. Removes a single entry from the plan.
+- `POST /meal-plans/:id/add-missing-to-shopping-list` — Auth required. Looks at recipes in the plan, compares ingredients to the caller’s pantry, and upserts missing ones into the shopping list.
+
 ## Service Function Notes
 
 - `getAll` (recipes.service) — Builds visibility based on auth, joins author, supports pagination/search/tag/status filters, orders by `updatedAt`.
