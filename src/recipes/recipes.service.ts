@@ -22,6 +22,7 @@ type RecipeWithAuthor = Omit<RecipeRow, 'tags'> & {
   tags: TagInfo[];
   tagIds: number[];
   author: AuthorInfo;
+  isFavorite?: boolean;
 };
 type PaginatedRecipes = {
   items: RecipeWithAuthor[];
@@ -34,6 +35,7 @@ type RecommendedRecipe = RecipeWithAuthor & {
   missingIngredients: string[];
   matchedCount: number;
   missingCount: number;
+  isFavorite?: boolean;
 };
 type PaginatedRecommendedRecipes = {
   items: RecommendedRecipe[];
@@ -152,7 +154,7 @@ export class RecipesService {
       tag?: string;
       status?: string;
     },
-  ): Promise<PaginatedRecipes> {
+  ): Promise<PaginatedRecommendedRecipes> {
     const user = await this.getUserFromAuth(authHeader);
     const { page, pageSize } = this.normalizePagination(params);
     const filters = this.buildRecipeFilters(params, undefined);
@@ -184,6 +186,8 @@ export class RecipesService {
     const tagsMap = await this.tagsService.getTagsForRecipeIds(
       rows.map((r) => r.recipe.id),
     );
+    const recipeIds = rows.map((r) => r.recipe.id);
+    const matchMap = await this.getPantryMatchesForRecipes(user.id, recipeIds);
 
     const [{ count }] = await this.db
       .select({ count: sql<number>`count(*)` })
@@ -196,7 +200,22 @@ export class RecipesService {
       .where(and(eq(schema.users.isDeleted, false), whereClause));
 
     return {
-      items: rows.map((row) => this.mapRecipeWithAuthor(row, tagsMap)),
+      items: rows.map((row) => {
+        const match = matchMap.get(row.recipe.id);
+        const matchedCount = match?.matchedCount ?? 0;
+        const missingCount =
+          match?.missingCount ??
+          Math.max((row.recipe.ingredients?.length ?? 0) - matchedCount, 0);
+
+        return {
+          ...this.mapRecipeWithAuthor(row, tagsMap),
+          matchedIngredients: match?.matchedIngredients ?? [],
+          missingIngredients: match?.missingIngredients ?? [],
+          matchedCount,
+          missingCount,
+          isFavorite: true,
+        };
+      }),
       page,
       pageSize,
       total: Number(count),
@@ -214,7 +233,10 @@ export class RecipesService {
       authorId?: string | number;
     },
   ): Promise<PaginatedRecommendedRecipes> {
-    const user = await this.getUserFromAuth(authHeader);
+    const user = await this.getUserFromOptionalAuth(authHeader);
+    if (!user) {
+      return this.getRecommendationsUnauthenticated(params);
+    }
     const { page, pageSize } = this.normalizePagination(params);
     const offset = (page - 1) * pageSize;
     const conditions = this.buildRecommendationConditions(user.id, params);
@@ -259,6 +281,19 @@ export class RecipesService {
     const recipeMap = new Map(
       recipes.map((row) => [row.recipe.id, row] as const),
     );
+    const favoriteRows =
+      recipeIds.length === 0
+        ? []
+        : await this.db
+            .select({ recipeId: schema.recipeFavorites.recipeId })
+            .from(schema.recipeFavorites)
+            .where(
+              and(
+                eq(schema.recipeFavorites.userId, user.id),
+                inArray(schema.recipeFavorites.recipeId, recipeIds),
+              ),
+            );
+    const favoriteSet = new Set(favoriteRows.map((r) => r.recipeId));
 
     const items = scoreRows
       .map((row) => {
@@ -280,6 +315,7 @@ export class RecipesService {
           missingIngredients,
           matchedCount,
           missingCount,
+          isFavorite: favoriteSet.has(data.recipe.id),
         };
       })
       .filter(Boolean) as RecommendedRecipe[];
@@ -685,6 +721,178 @@ export class RecipesService {
       return 5;
     }
     return Math.min(num, 20);
+  }
+
+  private async getPantryMatchesForRecipes(
+    userId: number,
+    recipeIds: string[],
+  ) {
+    if (recipeIds.length === 0) {
+      return new Map<
+        string,
+        {
+          matchedIngredients: string[];
+          missingIngredients: string[];
+          matchedCount: number;
+          missingCount: number;
+        }
+      >();
+    }
+
+    await this.ensurePgTrgmExtension();
+
+    const idsList = sql.join(
+      recipeIds.map((id) => sql`${id}`),
+      sql`, `,
+    );
+
+    const matchQuery = sql`
+      with pantry as (
+        select distinct lower(trim(name)) as token
+        from ${schema.pantryItems}
+        where ${schema.pantryItems.userId} = ${userId}
+          and ${schema.pantryItems.isFinished} = false
+          and ${schema.pantryItems.name} is not null
+      ),
+      visible as (
+        select ${schema.recipes.id} as id, ${schema.recipes.ingredients} as ingredients
+        from ${schema.recipes}
+        where ${schema.recipes.id} in (${idsList})
+      ),
+      recipe_ing as (
+        select v.id, jsonb_array_elements(v.ingredients) ->> 'name' as ing
+        from visible v
+      ),
+      scored as (
+        select
+          ri.id,
+          count(*) as total_ingredients,
+          count(*) filter (
+            where exists (
+              select 1
+              from pantry p
+              where ri.ing ilike '%' || p.token || '%'
+                 or p.token ilike '%' || ri.ing || '%'
+                 or similarity(ri.ing, p.token) >= 0.35
+            )
+          ) as match_count,
+          array_agg(distinct ri.ing) filter (
+            where exists (
+              select 1
+              from pantry p
+              where ri.ing ilike '%' || p.token || '%'
+                 or p.token ilike '%' || ri.ing || '%'
+                 or similarity(ri.ing, p.token) >= 0.35
+            )
+          ) as matched_ingredients,
+          array_agg(distinct ri.ing) filter (
+            where not exists (
+              select 1
+              from pantry p
+              where ri.ing ilike '%' || p.token || '%'
+                 or p.token ilike '%' || ri.ing || '%'
+                 or similarity(ri.ing, p.token) >= 0.35
+            )
+          ) as missing_ingredients
+        from recipe_ing ri
+        group by ri.id
+      )
+      select
+        s.id,
+        s.match_count,
+        s.total_ingredients,
+        coalesce(s.matched_ingredients, '{}') as matched_ingredients,
+        coalesce(s.missing_ingredients, '{}') as missing_ingredients
+      from scored s;
+    `;
+
+    const { rows } = (await this.db.execute(matchQuery)) as {
+      rows: ScoreRow[];
+    };
+    const map = new Map<
+      string,
+      {
+        matchedIngredients: string[];
+        missingIngredients: string[];
+        matchedCount: number;
+        missingCount: number;
+      }
+    >();
+
+    for (const row of rows ?? []) {
+      const matchedIngredients = (row.matched_ingredients as string[]) ?? [];
+      const missingIngredients = (row.missing_ingredients as string[]) ?? [];
+      const matchedCount =
+        matchedIngredients.length || Number(row.match_count ?? 0);
+      const missingCount =
+        missingIngredients.length ||
+        Math.max(Number(row.total_ingredients ?? 0) - matchedCount, 0);
+
+      map.set(row.id as string, {
+        matchedIngredients,
+        missingIngredients,
+        matchedCount,
+        missingCount,
+      });
+    }
+
+    return map;
+  }
+
+  private async getRecommendationsUnauthenticated(params?: {
+    page?: string | number;
+    pageSize?: string | number;
+    q?: string;
+    tag?: string;
+    status?: string;
+    authorId?: string | number;
+  }): Promise<PaginatedRecommendedRecipes> {
+    const { page, pageSize } = this.normalizePagination(params);
+    const filters = this.buildRecipeFilters(params, undefined);
+    const visibility = eq(schema.recipes.isPublic, true);
+    const whereClause =
+      filters.length > 0
+        ? and(eq(schema.users.isDeleted, false), visibility, ...filters)
+        : and(eq(schema.users.isDeleted, false), visibility);
+
+    const rows = await this.db
+      .select({
+        recipe: schema.recipes,
+        author: {
+          id: schema.users.id,
+          name: schema.users.name,
+          imageUrl: schema.users.imageUrl,
+        },
+      })
+      .from(schema.recipes)
+      .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
+      .where(whereClause)
+      .orderBy(desc(schema.recipes.updatedAt))
+      .limit(pageSize)
+      .offset((page - 1) * pageSize);
+
+    const tagsMap = await this.tagsService.getTagsForRecipeIds(
+      rows.map((r) => r.recipe.id),
+    );
+
+    const [{ count }] = await this.db
+      .select({ count: sql<number>`count(*)` })
+      .from(schema.recipes)
+      .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
+      .where(whereClause);
+
+    return {
+      items: rows.map((row) => ({
+        ...this.mapRecipeWithAuthor(row, tagsMap),
+        matchedIngredients: [],
+        missingIngredients: [],
+        matchedCount: 0,
+        missingCount: 0,
+      })),
+      page,
+      pageSize,
+      total: Number(count),
+    };
   }
 
   private async ensurePgTrgmExtension() {
