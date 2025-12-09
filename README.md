@@ -76,7 +76,7 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 - `getAll` (recipes.service) — Builds visibility based on auth, joins author, supports pagination/search/tag/status filters, orders by `updatedAt`.
 - `getMine` — Filters by caller’s `authorId`, supports pagination/search/tag/status, returns author info, sorted by `updatedAt`.
 - `getFavorites` — Returns the caller’s favorites with author info, supports pagination/search/tag/status, sorted by `updatedAt`.
-- `getRecommendations` — Uses pantry items to score recipes by ingredient overlap (substring + fuzzy `pg_trgm`), sorted by match ratio and count.
+- `getRecommendations` — Uses pantry items to score recipes by ingredient overlap (substring + fuzzy `pg_trgm`), sorted by best overlap; includes matched/missing ingredient lists and still returns recipes with zero matches.
 - `TagsService.getAll` — Returns all tags sorted by name.
 - `PantryService` — Parses auth, lists/creates/updates pantry items, supports bulk deletion by status, and finishes items by merging into existing finished entries unless `hard=true` deletes.
 - `ShoppingListService` — Parses auth, merges duplicate items (case-insensitive) and quantities, updates/deletes items, and when items are marked purchased they are added to the pantry with quantity merging.
@@ -86,6 +86,7 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 - `update` — Prevents empty payloads and duplicate slug collisions; enforces author ownership.
 - `delete` — Enforces author ownership before removal.
 - User service functions mirror the HTTP endpoints and validate presence/format of auth tokens.
+- `getRecommendations` — Returns paginated recipes with pantry context (substring + fuzzy `pg_trgm`), sorted by best overlap and includes `matchedIngredients` / `missingIngredients` arrays (with counts); recipes with zero matches are still returned. Filterable with `page`, `pageSize`, `q`, `tag`, or `status`.
 
 ## Development
 

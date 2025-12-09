@@ -71,10 +71,12 @@ export class RecipesController {
     @AuthHeader() authHeader: string | undefined,
     @Query()
     query: {
-      limit?: string;
+      page?: string;
+      pageSize?: string;
       q?: string;
       tag?: string;
       status?: string;
+      authorId?: string;
     },
   ) {
     return this.recipesService.getRecommendations(authHeader, query);

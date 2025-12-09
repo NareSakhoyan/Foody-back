@@ -30,10 +30,16 @@ type PaginatedRecipes = {
   total: number;
 };
 type RecommendedRecipe = RecipeWithAuthor & {
-  matchCount: number;
-  matchRatio: number;
   matchedIngredients: string[];
   missingIngredients: string[];
+  matchedCount: number;
+  missingCount: number;
+};
+type PaginatedRecommendedRecipes = {
+  items: RecommendedRecipe[];
+  page: number;
+  pageSize: number;
+  total: number;
 };
 type ScoreRow = {
   id: string;
@@ -42,6 +48,7 @@ type ScoreRow = {
   match_ratio: string | number | null;
   matched_ingredients: string[] | null;
   missing_ingredients: string[] | null;
+  total_count?: string | number | null;
 };
 
 export type CreateRecipeInput = {
@@ -199,14 +206,17 @@ export class RecipesService {
   async getRecommendations(
     authHeader: string | undefined,
     params?: {
-      limit?: string | number;
+      page?: string | number;
+      pageSize?: string | number;
       q?: string;
       tag?: string;
       status?: string;
+      authorId?: string | number;
     },
-  ): Promise<RecommendedRecipe[]> {
+  ): Promise<PaginatedRecommendedRecipes> {
     const user = await this.getUserFromAuth(authHeader);
-    const limit = this.normalizeLimit(params?.limit);
+    const { page, pageSize } = this.normalizePagination(params);
+    const offset = (page - 1) * pageSize;
     const conditions = this.buildRecommendationConditions(user.id, params);
     await this.ensurePgTrgmExtension();
     const whereClause =
@@ -216,7 +226,8 @@ export class RecipesService {
 
     const recommendationQuery = buildRecommendationScoreQuery({
       userId: user.id,
-      limit,
+      limit: pageSize,
+      offset,
       whereClause,
     });
 
@@ -226,59 +237,7 @@ export class RecipesService {
 
     const scoreRows = scoredRows ?? [];
     if (scoreRows.length === 0) {
-      const fallbackFilters = this.buildRecipeFilters(
-        params
-          ? {
-              q: params.q,
-              tag: params.tag,
-              status: params.status,
-            }
-          : undefined,
-        undefined,
-        false,
-      );
-      const visibility = or(
-        eq(schema.recipes.isPublic, true),
-        eq(schema.recipes.authorId, user.id),
-      );
-      const ingredientCount = sql<number>`jsonb_array_length(${schema.recipes.ingredients})`;
-
-      const fallbackRows = await this.db
-        .select({
-          recipe: schema.recipes,
-          author: {
-            id: schema.users.id,
-            name: schema.users.name,
-            imageUrl: schema.users.imageUrl,
-          },
-          ingredientCount,
-        })
-        .from(schema.recipes)
-        .innerJoin(schema.users, eq(schema.users.id, schema.recipes.authorId))
-        .where(
-          and(
-            eq(schema.users.isDeleted, false),
-            visibility,
-            ...fallbackFilters,
-          ),
-        )
-        .orderBy(ingredientCount, desc(schema.recipes.updatedAt))
-        .limit(limit);
-
-      if (fallbackRows.length === 0) {
-        return [];
-      }
-
-      const recipeIds = fallbackRows.map((row) => row.recipe.id);
-      const tagsMap = await this.tagsService.getTagsForRecipeIds(recipeIds);
-
-      return fallbackRows.map((row) => ({
-        ...this.mapRecipeWithAuthor(row, tagsMap),
-        matchCount: 0,
-        matchRatio: 0,
-        matchedIngredients: [],
-        missingIngredients: [],
-      }));
+      return { items: [], page, pageSize, total: 0 };
     }
 
     const recipeIds = scoreRows.map((row) => row.id as string);
@@ -301,26 +260,36 @@ export class RecipesService {
       recipes.map((row) => [row.recipe.id, row] as const),
     );
 
-    return scoreRows
+    const items = scoreRows
       .map((row) => {
         const data = recipeMap.get(row.id);
         if (!data) {
           return null;
         }
-        const matchCount = Number(row.match_count ?? 0);
-        const matchRatio = Number(row.match_ratio ?? 0);
         const matchedIngredients = (row.matched_ingredients as string[]) ?? [];
         const missingIngredients = (row.missing_ingredients as string[]) ?? [];
+        const matchedCount =
+          matchedIngredients.length || Number(row.match_count ?? 0);
+        const missingCount =
+          missingIngredients.length ||
+          Math.max(Number(row.total_ingredients ?? 0) - matchedCount, 0);
 
         return {
           ...this.mapRecipeWithAuthor(data, tagsMap),
-          matchCount,
-          matchRatio,
           matchedIngredients,
           missingIngredients,
+          matchedCount,
+          missingCount,
         };
       })
       .filter(Boolean) as RecommendedRecipe[];
+
+    const total =
+      scoreRows.length > 0
+        ? Number(scoreRows[0]?.total_count ?? scoreRows.length)
+        : 0;
+
+    return { items, page, pageSize, total };
   }
 
   async addFavorite(
