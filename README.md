@@ -22,13 +22,14 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 - Responses from list endpoints include `author: { id, name, imageUrl }`.
 - Favorites: users can mark recipes as favorites; stored in `recipe_favorites` (unique per user/recipe).
 - Tags are stored both on the recipe row and in separate `tags` / `recipe_tags` tables; recipe creation upserts tags and links them.
+- Authenticated recipe searches that include `q` are stored per user in `search_history` (latest query, filters, timestamp).
 
 ## Recipes Endpoints
 
-- `GET /recipes` — Public list of recipes. If the auth header is provided, also includes the caller’s private recipes. Sorted by `updatedAt` desc. Returns author info with each recipe. Query: `page`, `pageSize`, `q` (search name/shortDescription), `tag`, `status`, `authorId`.
-- `GET /recipes/mine` — Auth required. Lists only the caller’s recipes, sorted by `updatedAt` desc, with author info. Query: `page`, `pageSize`, `q`, `tag`, `status`.
-- `GET /recipes/favorites` — Auth required. Lists the caller’s favorited recipes, sorted by `updatedAt`. Query: `page`, `pageSize`, `q`, `tag`, `status`.
-- `GET /recipes/recommendations` — Auth required. Uses the caller’s pantry items to recommend recipes with ingredient matches. Query: `limit`, `q`, `tag`, `status`.
+- `GET /recipes` — Public list of recipes. If the auth header is provided, also includes the caller’s private recipes. Sorted by `updatedAt` desc. Returns author info with each recipe. Query: `page`, `pageSize`, `q` (search name/shortDescription), `tag`, `status`, `authorId`, `maxPrepTime`, `maxCookTime`, `maxTotalTime`, `includeIngredients`, `excludeIngredients`, `maxMissingIngredients`, `minMatchPercent` (pantry-based filters require auth).
+- `GET /recipes/mine` — Auth required. Lists only the caller’s recipes, sorted by `updatedAt` desc, with author info. Query: `page`, `pageSize`, `q`, `tag`, `status`, `maxPrepTime`, `maxCookTime`, `maxTotalTime`, `includeIngredients`, `excludeIngredients`, `maxMissingIngredients`, `minMatchPercent`.
+- `GET /recipes/favorites` — Auth required. Lists the caller’s favorited recipes, sorted by `updatedAt`. Query: `page`, `pageSize`, `q`, `tag`, `status`, `maxPrepTime`, `maxCookTime`, `maxTotalTime`, `includeIngredients`, `excludeIngredients`, `maxMissingIngredients`, `minMatchPercent`.
+- `GET /recipes/recommendations` — Auth required. Uses the caller’s pantry items to recommend recipes with ingredient matches. Query: `page`, `pageSize`, `q`, `tag`, `status`, `authorId`, `maxPrepTime`, `maxCookTime`, `maxTotalTime`, `includeIngredients`, `excludeIngredients`, `maxMissingIngredients`, `minMatchPercent` (unauthenticated calls reject pantry-based filters).
 - `GET /recipes/:id` — Public if the recipe is `isPublic`; otherwise requires the author. Returns the recipe.
 - `POST /recipes/:id/favorite` — Auth required. Adds the recipe to the caller’s favorites (no-op if already favorited).
 - `POST /recipes` — Auth required. Creates a recipe. Required body: `name`, `slug`, `ingredients`. Optional: `shortDescription`, `imageUrl`, `prepDescription`, `cookDescription`, `prepTimeMinutes`, `cookTimeMinutes`, `servings`, `tags`, `isPublic`, `status`.
@@ -71,12 +72,18 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 - `DELETE /meal-plans/:id/entries/:entryId` — Auth required. Removes a single entry from the plan.
 - `POST /meal-plans/:id/add-missing-to-shopping-list` — Auth required. Looks at recipes in the plan, compares ingredients to the caller’s pantry, and upserts missing ones into the shopping list.
 
+## Search History Endpoints
+
+- `GET /search-history` — Auth required. Returns the caller’s recent search history (paginated, newest first). Query: `page`, `pageSize`. Response shape: `{ items: [{ id, query, filters, createdAt }], page, pageSize, total }`.
+- `DELETE /search-history` — Auth required. Deletes all search history entries for the caller. Response: `{ deletedCount }`.
+- `DELETE /search-history/:id` — Auth required. Deletes a single entry for the caller. Response: `{ deleted }`.
+
 ## Service Function Notes
 
-- `getAll` (recipes.service) — Builds visibility based on auth, joins author, supports pagination/search/tag/status filters, orders by `updatedAt`.
-- `getMine` — Filters by caller’s `authorId`, supports pagination/search/tag/status, returns author info, sorted by `updatedAt`.
-- `getFavorites` — Returns the caller’s favorites with author info, supports pagination/search/tag/status, sorted by `updatedAt`.
-- `getRecommendations` — Uses pantry items to score recipes by ingredient overlap (substring + fuzzy `pg_trgm`), sorted by best overlap; includes matched/missing ingredient lists, `isFavorite` flag per recipe, and still returns recipes with zero matches (unauthenticated requests get public recipes without user-specific fields).
+- `getAll` (recipes.service) — Builds visibility based on auth, joins author, supports pagination/search/tag/status plus time filters (`maxPrepTime`, `maxCookTime`, `maxTotalTime`) and ingredient filters (`includeIngredients`, `excludeIngredients`, pantry-based `maxMissingIngredients`, `minMatchPercent`), orders by `updatedAt`.
+- `getMine` — Filters by caller’s `authorId`, supports pagination/search/tag/status and the same time/ingredient filters, returns author info, sorted by `updatedAt`.
+- `getFavorites` — Returns the caller’s favorites with author info, supports pagination/search/tag/status and time/ingredient filters (pantry filters use the caller’s pantry), sorted by `updatedAt`.
+- `getRecommendations` — Uses pantry items to score recipes by ingredient overlap (substring + fuzzy `pg_trgm`), sorted by best overlap; supports tag/search/time/ingredient filters, includes matched/missing ingredient lists, `isFavorite` flag per recipe, and still returns recipes with zero matches (unauthenticated requests get public recipes without user-specific fields).
 - `TagsService.getAll` — Returns all tags sorted by name.
 - `PantryService` — Parses auth, lists/creates/updates pantry items, supports bulk deletion by status, and finishes items by merging into existing finished entries unless `hard=true` deletes.
 - `ShoppingListService` — Parses auth, merges duplicate items (case-insensitive) and quantities, updates/deletes items, and when items are marked purchased they are added to the pantry with quantity merging.
@@ -86,7 +93,6 @@ Small NestJS + Drizzle API for recipes and users. This document lists the availa
 - `update` — Prevents empty payloads and duplicate slug collisions; enforces author ownership.
 - `delete` — Enforces author ownership before removal.
 - User service functions mirror the HTTP endpoints and validate presence/format of auth tokens.
-- `getRecommendations` — Returns paginated recipes with pantry context (substring + fuzzy `pg_trgm`), sorted by best overlap and includes `matchedIngredients` / `missingIngredients` arrays (with counts) plus `isFavorite` when authenticated; unauthenticated calls return public recipes without user-specific fields. Filterable with `page`, `pageSize`, `q`, `tag`, or `status`.
 
 ## Development
 

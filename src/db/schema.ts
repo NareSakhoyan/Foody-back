@@ -28,6 +28,31 @@ export const users = pgTable('users', {
     .notNull(),
 });
 
+export type SearchFilters = {
+  tag?: string;
+  status?: string;
+  authorId?: number;
+  maxPrepTime?: number;
+  maxCookTime?: number;
+  maxTotalTime?: number;
+  includeIngredients?: string[];
+  excludeIngredients?: string[];
+  maxMissingIngredients?: number;
+  minMatchPercent?: number;
+};
+
+export const searchHistory = pgTable('search_history', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  query: varchar('query', { length: 300 }).notNull(),
+  filters: jsonb('filters').$type<SearchFilters>().default({}).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
 export type Ingredient = {
   name: string;
   quantity: number;

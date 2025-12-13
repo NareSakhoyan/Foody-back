@@ -9,6 +9,7 @@ import { TagsModule } from './tags/tags.module';
 import { PantryModule } from './pantry/pantry.module';
 import { ShoppingListModule } from './shopping-list/shopping-list.module';
 import { MealPlansModule } from './meal-plans/meal-plans.module';
+import { SearchHistoryModule } from './search-history/search-history.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { MealPlansModule } from './meal-plans/meal-plans.module';
     PantryModule,
     ShoppingListModule,
     MealPlansModule,
+    SearchHistoryModule,
   ],
   controllers: [AppController],
   providers: [AppService],

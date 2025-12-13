@@ -16,6 +16,22 @@ import {
   type UpdateRecipeInput,
 } from './recipes.service';
 
+type RecipeQuery = {
+  page?: string;
+  pageSize?: string;
+  q?: string;
+  tag?: string;
+  status?: string;
+  authorId?: string;
+  maxPrepTime?: string;
+  maxCookTime?: string;
+  maxTotalTime?: string;
+  includeIngredients?: string | string[];
+  excludeIngredients?: string | string[];
+  maxMissingIngredients?: string;
+  minMatchPercent?: string;
+};
+
 @Controller('recipes')
 export class RecipesController {
   constructor(private readonly recipesService: RecipesService) {}
@@ -23,15 +39,7 @@ export class RecipesController {
   @Get()
   getAll(
     @AuthHeader() authHeader: string | undefined,
-    @Query()
-    query: {
-      page?: string;
-      pageSize?: string;
-      q?: string;
-      tag?: string;
-      status?: string;
-      authorId?: string;
-    },
+    @Query() query: RecipeQuery,
   ) {
     return this.recipesService.getAll(authHeader, query);
   }
@@ -39,14 +47,7 @@ export class RecipesController {
   @Get('mine')
   getMine(
     @AuthHeader() authHeader: string | undefined,
-    @Query()
-    query: {
-      page?: string;
-      pageSize?: string;
-      q?: string;
-      tag?: string;
-      status?: string;
-    },
+    @Query() query: RecipeQuery,
   ) {
     return this.recipesService.getMine(authHeader, query);
   }
@@ -54,14 +55,7 @@ export class RecipesController {
   @Get('favorites')
   getFavorites(
     @AuthHeader() authHeader: string | undefined,
-    @Query()
-    query: {
-      page?: string;
-      pageSize?: string;
-      q?: string;
-      tag?: string;
-      status?: string;
-    },
+    @Query() query: RecipeQuery,
   ) {
     return this.recipesService.getFavorites(authHeader, query);
   }
@@ -69,15 +63,7 @@ export class RecipesController {
   @Get('recommendations')
   getRecommendations(
     @AuthHeader() authHeader: string | undefined,
-    @Query()
-    query: {
-      page?: string;
-      pageSize?: string;
-      q?: string;
-      tag?: string;
-      status?: string;
-      authorId?: string;
-    },
+    @Query() query: RecipeQuery,
   ) {
     return this.recipesService.getRecommendations(authHeader, query);
   }

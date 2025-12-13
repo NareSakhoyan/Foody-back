@@ -6,6 +6,7 @@ export type RecommendationQueryParams = {
   limit: number;
   offset: number;
   whereClause: SQL;
+  scoreFilters?: SQL[];
 };
 
 export const buildRecommendationScoreQuery = ({
@@ -13,6 +14,7 @@ export const buildRecommendationScoreQuery = ({
   limit,
   offset,
   whereClause,
+  scoreFilters,
 }: RecommendationQueryParams) => sql`
   with pantry as (
     select distinct lower(trim(name)) as token
@@ -75,6 +77,11 @@ export const buildRecommendationScoreQuery = ({
     coalesce(s.missing_ingredients, '{}') as missing_ingredients,
     count(*) over() as total_count
   from scored s
+  ${
+    scoreFilters && scoreFilters.length > 0
+      ? sql`where ${sql.join(scoreFilters, sql` and `)}`
+      : sql``
+  }
   order by match_ratio desc, s.match_count desc, s.total_ingredients asc, s.id
   limit ${limit}
   offset ${offset};

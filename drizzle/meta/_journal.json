@@ -64,6 +64,13 @@
       "when": 1737072000000,
       "tag": "0008_meal_plans",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1737073000000,
+      "tag": "0009_search_history",
+      "breakpoints": true
     }
   ]
 }

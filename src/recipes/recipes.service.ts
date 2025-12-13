@@ -9,7 +9,7 @@ import {
 import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { DRIZZLE, schema } from '../db/db.module';
 import type { DrizzleDb } from '../db/db.module';
-import type { Ingredient } from '../db/schema';
+import type { Ingredient, SearchFilters } from '../db/schema';
 import { TagsService, type TagInfo } from '../tags/tags.service';
 import { buildRecommendationScoreQuery } from './sql/recommendations';
 
@@ -53,6 +53,33 @@ type ScoreRow = {
   total_count?: string | number | null;
 };
 
+type RecipeQueryParams = {
+  page?: string | number;
+  pageSize?: string | number;
+  q?: string;
+  tag?: string;
+  status?: string;
+  authorId?: string | number;
+  maxPrepTime?: string | number;
+  maxCookTime?: string | number;
+  maxTotalTime?: string | number;
+  includeIngredients?: string | string[];
+  excludeIngredients?: string | string[];
+  maxMissingIngredients?: string | number;
+  minMatchPercent?: string | number;
+};
+
+type NormalizedRecipeFilters = {
+  maxPrepTime?: number;
+  maxCookTime?: number;
+  maxTotalTime?: number;
+  includeIngredients: string[];
+  excludeIngredients: string[];
+  maxMissingIngredients?: number;
+  minMatchRatio?: number;
+  requiresPantry: boolean;
+};
+
 export type CreateRecipeInput = {
   name: string;
   slug: string;
@@ -89,18 +116,26 @@ export class RecipesService {
 
   async getAll(
     authHeader: string | undefined,
-    params?: {
-      page?: string | number;
-      pageSize?: string | number;
-      q?: string;
-      tag?: string;
-      status?: string;
-      authorId?: string | number;
-    },
+    params?: RecipeQueryParams,
   ): Promise<PaginatedRecipes> {
     const user = await this.getUserFromOptionalAuth(authHeader);
+    const normalizedFilters = this.normalizeRecipeFilters(params);
+    if (normalizedFilters.requiresPantry && !user) {
+      throw new BadRequestException(
+        'Pantry-based ingredient filters require authentication',
+      );
+    }
+    if (normalizedFilters.requiresPantry) {
+      await this.ensurePgTrgmExtension();
+    }
+    if (user) {
+      await this.recordSearchHistory(user.id, params, normalizedFilters);
+    }
     const { page, pageSize } = this.normalizePagination(params);
-    const filters = this.buildRecipeFilters(params, user?.id);
+    const filters = this.buildRecipeFilters(params, normalizedFilters, {
+      callerId: user?.id,
+      pantryUserId: user?.id,
+    });
     const visibility = user
       ? or(
           eq(schema.recipes.isPublic, true),
@@ -147,17 +182,18 @@ export class RecipesService {
 
   async getFavorites(
     authHeader?: string,
-    params?: {
-      page?: string | number;
-      pageSize?: string | number;
-      q?: string;
-      tag?: string;
-      status?: string;
-    },
+    params?: RecipeQueryParams,
   ): Promise<PaginatedRecommendedRecipes> {
     const user = await this.getUserFromAuth(authHeader);
+    const normalizedFilters = this.normalizeRecipeFilters(params);
+    if (normalizedFilters.requiresPantry) {
+      await this.ensurePgTrgmExtension();
+    }
+    await this.recordSearchHistory(user.id, params, normalizedFilters);
     const { page, pageSize } = this.normalizePagination(params);
-    const filters = this.buildRecipeFilters(params, undefined);
+    const filters = this.buildRecipeFilters(params, normalizedFilters, {
+      pantryUserId: user.id,
+    });
     const whereClause =
       filters.length > 0
         ? and(eq(schema.recipeFavorites.userId, user.id), ...filters)
@@ -224,33 +260,40 @@ export class RecipesService {
 
   async getRecommendations(
     authHeader: string | undefined,
-    params?: {
-      page?: string | number;
-      pageSize?: string | number;
-      q?: string;
-      tag?: string;
-      status?: string;
-      authorId?: string | number;
-    },
+    params?: RecipeQueryParams,
   ): Promise<PaginatedRecommendedRecipes> {
+    const normalizedFilters = this.normalizeRecipeFilters(params);
     const user = await this.getUserFromOptionalAuth(authHeader);
     if (!user) {
+      if (normalizedFilters.requiresPantry) {
+        throw new BadRequestException(
+          'Pantry-based ingredient filters require authentication',
+        );
+      }
       return this.getRecommendationsUnauthenticated(params);
     }
     const { page, pageSize } = this.normalizePagination(params);
     const offset = (page - 1) * pageSize;
-    const conditions = this.buildRecommendationConditions(user.id, params);
+    const conditions = this.buildRecommendationConditions(
+      user.id,
+      params,
+      normalizedFilters,
+    );
     await this.ensurePgTrgmExtension();
+    await this.recordSearchHistory(user.id, params, normalizedFilters);
     const whereClause =
       conditions.length > 0
         ? sql`where ${sql.join(conditions, sql` and `)}`
         : sql``;
+    const scoreFilters =
+      this.buildRecommendationScoreFilters(normalizedFilters);
 
     const recommendationQuery = buildRecommendationScoreQuery({
       userId: user.id,
       limit: pageSize,
       offset,
       whereClause,
+      scoreFilters,
     });
 
     const { rows: scoredRows } = (await this.db.execute(
@@ -368,17 +411,20 @@ export class RecipesService {
 
   async getMine(
     authHeader?: string,
-    params?: {
-      page?: string | number;
-      pageSize?: string | number;
-      q?: string;
-      tag?: string;
-      status?: string;
-    },
+    params?: RecipeQueryParams,
   ): Promise<PaginatedRecipes> {
     const user = await this.getUserFromAuth(authHeader);
+    const normalizedFilters = this.normalizeRecipeFilters(params);
+    if (normalizedFilters.requiresPantry) {
+      await this.ensurePgTrgmExtension();
+    }
+    await this.recordSearchHistory(user.id, params, normalizedFilters);
     const { page, pageSize } = this.normalizePagination(params);
-    const filters = this.buildRecipeFilters(params, user.id, true);
+    const filters = this.buildRecipeFilters(params, normalizedFilters, {
+      callerId: user.id,
+      forceAuthor: true,
+      pantryUserId: user.id,
+    });
 
     const rows = await this.db
       .select({
@@ -703,10 +749,153 @@ export class RecipesService {
     };
   }
 
-  private normalizePagination(params?: {
-    page?: string | number;
-    pageSize?: string | number;
-  }) {
+  private normalizeRecipeFilters(
+    params?: RecipeQueryParams,
+  ): NormalizedRecipeFilters {
+    const maxPrepTime = this.parseNumberFilter(params?.maxPrepTime);
+    const maxCookTime = this.parseNumberFilter(params?.maxCookTime);
+    const maxTotalTime = this.parseNumberFilter(params?.maxTotalTime);
+    const includeIngredients = this.normalizeIngredientList(
+      params?.includeIngredients,
+    );
+    const excludeIngredients = this.normalizeIngredientList(
+      params?.excludeIngredients,
+    );
+    const maxMissingIngredients = this.parseNumberFilter(
+      params?.maxMissingIngredients,
+    );
+    const minMatchRatio = this.parsePercentFilter(params?.minMatchPercent);
+
+    return {
+      maxPrepTime,
+      maxCookTime,
+      maxTotalTime,
+      includeIngredients,
+      excludeIngredients,
+      maxMissingIngredients,
+      minMatchRatio,
+      requiresPantry:
+        maxMissingIngredients !== undefined || minMatchRatio !== undefined,
+    };
+  }
+
+  private async recordSearchHistory(
+    userId: number,
+    params: RecipeQueryParams | undefined,
+    filters: NormalizedRecipeFilters,
+  ) {
+    const query = params?.q?.trim();
+    if (!query) {
+      return;
+    }
+
+    const authorId =
+      params?.authorId !== undefined && params.authorId !== null
+        ? Number(params.authorId)
+        : undefined;
+    const authorIdValue =
+      authorId !== undefined && Number.isFinite(authorId)
+        ? authorId
+        : undefined;
+
+    const payload = this.compactFilters({
+      tag: params?.tag,
+      status: params?.status,
+      authorId: authorIdValue,
+      maxPrepTime: filters.maxPrepTime,
+      maxCookTime: filters.maxCookTime,
+      maxTotalTime: filters.maxTotalTime,
+      includeIngredients: filters.includeIngredients,
+      excludeIngredients: filters.excludeIngredients,
+      maxMissingIngredients: filters.maxMissingIngredients,
+      minMatchPercent:
+        filters.minMatchRatio !== undefined
+          ? filters.minMatchRatio * 100
+          : undefined,
+    });
+
+    const signature = this.buildHistorySignature(query, payload);
+
+    const [latest] = await this.db
+      .select()
+      .from(schema.searchHistory)
+      .where(eq(schema.searchHistory.userId, userId))
+      .orderBy(desc(schema.searchHistory.createdAt))
+      .limit(1);
+
+    if (latest) {
+      const latestSignature = this.buildHistorySignature(
+        latest.query,
+        (latest.filters as SearchFilters) ?? {},
+      );
+      if (latestSignature === signature) {
+        return;
+      }
+    }
+
+    try {
+      await this.db.transaction(async (tx) => {
+        await tx
+          .delete(schema.searchHistory)
+          .where(
+            and(
+              eq(schema.searchHistory.userId, userId),
+              eq(schema.searchHistory.query, query),
+              sql`${schema.searchHistory.filters} = ${payload}`,
+            ),
+          );
+
+        await tx.insert(schema.searchHistory).values({
+          userId,
+          query,
+          filters: payload,
+        });
+      });
+    } catch {
+      // ignore failures so search flow is not blocked by history writes
+    }
+  }
+
+  private compactFilters(filters: SearchFilters): SearchFilters {
+    const normalized: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(filters)) {
+      if (value === undefined) {
+        continue;
+      }
+      if (Array.isArray(value) && value.length === 0) {
+        continue;
+      }
+      normalized[key] = value;
+    }
+    return normalized as SearchFilters;
+  }
+
+  private buildHistorySignature(query: string, filters: SearchFilters) {
+    const normalizedFilters = this.normalizeFiltersForSignature(filters);
+    return `${query.trim().toLowerCase()}|${JSON.stringify(normalizedFilters)}`;
+  }
+
+  private normalizeFiltersForSignature(filters: SearchFilters) {
+    const sortedKeys = Object.keys(filters).sort();
+    const normalized: Record<string, unknown> = {};
+
+    for (const key of sortedKeys) {
+      const value = filters[key as keyof SearchFilters];
+      if (Array.isArray(value)) {
+        normalized[key] = [...value].sort();
+      } else if (value && typeof value === 'object') {
+        normalized[key] = this.normalizeFiltersForSignature(
+          value as SearchFilters,
+        );
+      } else {
+        normalized[key] = value;
+      }
+    }
+
+    return normalized;
+  }
+
+  private normalizePagination(params?: RecipeQueryParams) {
     const pageNum = Number(params?.page) || 1;
     const pageSizeNum = Number(params?.pageSize) || 20;
     return {
@@ -721,6 +910,90 @@ export class RecipesService {
       return 5;
     }
     return Math.min(num, 20);
+  }
+
+  private normalizeIngredientList(value?: string | string[]): string[] {
+    if (!value) {
+      return [];
+    }
+    const parts = Array.isArray(value) ? value : [value];
+
+    const normalized = parts
+      .flatMap((part) => part.split(','))
+      .map((part) => part.trim().toLowerCase())
+      .filter(Boolean);
+
+    return Array.from(new Set(normalized));
+  }
+
+  private parseNumberFilter(value?: string | number) {
+    const normalized = typeof value === 'string' ? value.trim() : value;
+    if (normalized === undefined || normalized === null || normalized === '') {
+      return undefined;
+    }
+    const num = Number(normalized);
+    if (!Number.isFinite(num) || num < 0) {
+      return undefined;
+    }
+    return num;
+  }
+
+  private parsePercentFilter(value?: string | number) {
+    const num = this.parseNumberFilter(value);
+    if (num === undefined) {
+      return undefined;
+    }
+
+    const clamped = Math.min(Math.max(num, 0), 100);
+    return clamped / 100;
+  }
+
+  private buildPantryMatchExpressions(pantryUserId: number) {
+    const totalIngredients = sql`(select count(*) from jsonb_array_elements(${schema.recipes.ingredients}))`;
+    const matchCount = sql`
+      (
+        select count(*)
+        from jsonb_array_elements(${schema.recipes.ingredients}) elem(value)
+        where exists (
+          select 1
+          from ${schema.pantryItems}
+          where ${schema.pantryItems.userId} = ${pantryUserId}
+            and ${schema.pantryItems.isFinished} = false
+            and ${schema.pantryItems.name} is not null
+            and (
+              (elem.value ->> 'name') ilike '%' || lower(trim(${schema.pantryItems.name})) || '%'
+              or lower(trim(${schema.pantryItems.name})) ilike '%' || (elem.value ->> 'name') || '%'
+              or similarity(elem.value ->> 'name', lower(trim(${schema.pantryItems.name}))) >= 0.35
+            )
+        )
+      )
+    `;
+    const missingCount = sql`
+      (
+        select count(*)
+        from jsonb_array_elements(${schema.recipes.ingredients}) elem(value)
+        where not exists (
+          select 1
+          from ${schema.pantryItems}
+          where ${schema.pantryItems.userId} = ${pantryUserId}
+            and ${schema.pantryItems.isFinished} = false
+            and ${schema.pantryItems.name} is not null
+            and (
+              (elem.value ->> 'name') ilike '%' || lower(trim(${schema.pantryItems.name})) || '%'
+              or lower(trim(${schema.pantryItems.name})) ilike '%' || (elem.value ->> 'name') || '%'
+              or similarity(elem.value ->> 'name', lower(trim(${schema.pantryItems.name}))) >= 0.35
+            )
+        )
+      )
+    `;
+    const matchRatio = sql`coalesce((${matchCount}::numeric) / nullif(${totalIngredients}, 0), 0)`;
+
+    return {
+      totalIngredients,
+      matchCount,
+      missingCount,
+      matchRatio,
+    };
   }
 
   private async getPantryMatchesForRecipes(
@@ -839,16 +1112,17 @@ export class RecipesService {
     return map;
   }
 
-  private async getRecommendationsUnauthenticated(params?: {
-    page?: string | number;
-    pageSize?: string | number;
-    q?: string;
-    tag?: string;
-    status?: string;
-    authorId?: string | number;
-  }): Promise<PaginatedRecommendedRecipes> {
+  private async getRecommendationsUnauthenticated(
+    params?: RecipeQueryParams,
+  ): Promise<PaginatedRecommendedRecipes> {
+    const normalizedFilters = this.normalizeRecipeFilters(params);
+    if (normalizedFilters.requiresPantry) {
+      throw new BadRequestException(
+        'Pantry-based ingredient filters require authentication',
+      );
+    }
     const { page, pageSize } = this.normalizePagination(params);
-    const filters = this.buildRecipeFilters(params, undefined);
+    const filters = this.buildRecipeFilters(params, normalizedFilters);
     const visibility = eq(schema.recipes.isPublic, true);
     const whereClause =
       filters.length > 0
@@ -906,12 +1180,8 @@ export class RecipesService {
 
   private buildRecommendationConditions(
     userId: number,
-    params?: {
-      q?: string;
-      tag?: string;
-      status?: string;
-      authorId?: string | number;
-    },
+    params: RecipeQueryParams | undefined,
+    filters: NormalizedRecipeFilters,
   ) {
     const conditions: any[] = [
       sql`${schema.users.isDeleted} = false`,
@@ -948,22 +1218,80 @@ export class RecipesService {
       }
     }
 
+    if (filters.maxPrepTime !== undefined) {
+      conditions.push(
+        sql`coalesce(${schema.recipes.prepTimeMinutes}, 0) <= ${filters.maxPrepTime}`,
+      );
+    }
+
+    if (filters.maxCookTime !== undefined) {
+      conditions.push(
+        sql`coalesce(${schema.recipes.cookTimeMinutes}, 0) <= ${filters.maxCookTime}`,
+      );
+    }
+
+    if (filters.maxTotalTime !== undefined) {
+      conditions.push(
+        sql`coalesce(${schema.recipes.prepTimeMinutes}, 0) + coalesce(${schema.recipes.cookTimeMinutes}, 0) <= ${filters.maxTotalTime}`,
+      );
+    }
+
+    for (const ingredient of filters.includeIngredients) {
+      const like = `%${ingredient}%`;
+      conditions.push(
+        sql`exists (
+          select 1
+          from jsonb_array_elements(${schema.recipes.ingredients}) elem(value)
+          where lower(elem.value ->> 'name') ilike ${like}
+        )`,
+      );
+    }
+
+    for (const ingredient of filters.excludeIngredients) {
+      const like = `%${ingredient}%`;
+      conditions.push(
+        sql`not exists (
+          select 1
+          from jsonb_array_elements(${schema.recipes.ingredients}) elem(value)
+          where lower(elem.value ->> 'name') ilike ${like}
+        )`,
+      );
+    }
+
+    return conditions;
+  }
+
+  private buildRecommendationScoreFilters(filters: NormalizedRecipeFilters) {
+    const conditions: any[] = [];
+
+    if (filters.maxMissingIngredients !== undefined) {
+      conditions.push(
+        sql`greatest(s.total_ingredients - coalesce(s.match_count, 0), 0) <= ${filters.maxMissingIngredients}`,
+      );
+    }
+
+    if (filters.minMatchRatio !== undefined) {
+      conditions.push(
+        sql`coalesce((s.match_count::numeric / nullif(s.total_ingredients, 0)), 0) >= ${filters.minMatchRatio}`,
+      );
+    }
+
     return conditions;
   }
 
   private buildRecipeFilters(
-    params:
-      | {
-          q?: string;
-          tag?: string;
-          status?: string;
-          authorId?: string | number;
-        }
-      | undefined,
-    callerId?: number,
-    forceAuthor?: boolean,
+    params: RecipeQueryParams | undefined,
+    filters: NormalizedRecipeFilters,
+    options?: {
+      callerId?: number;
+      forceAuthor?: boolean;
+      pantryUserId?: number;
+    },
   ) {
     const conditions: any[] = [];
+    const callerId = options?.callerId;
+    const pantryUserId = options?.pantryUserId;
+    const forceAuthor = options?.forceAuthor;
 
     if (forceAuthor && callerId) {
       conditions.push(eq(schema.recipes.authorId, callerId));
@@ -994,6 +1322,65 @@ export class RecipesService {
       } else {
         conditions.push(
           sql`${schema.recipes.id} IN (select ${schema.recipeTags.recipeId} from ${schema.recipeTags} join ${schema.tags} on ${schema.tags.id} = ${schema.recipeTags.tagId} where ${schema.tags.name} = ${params.tag})`,
+        );
+      }
+    }
+
+    if (filters.maxPrepTime !== undefined) {
+      conditions.push(
+        sql`coalesce(${schema.recipes.prepTimeMinutes}, 0) <= ${filters.maxPrepTime}`,
+      );
+    }
+
+    if (filters.maxCookTime !== undefined) {
+      conditions.push(
+        sql`coalesce(${schema.recipes.cookTimeMinutes}, 0) <= ${filters.maxCookTime}`,
+      );
+    }
+
+    if (filters.maxTotalTime !== undefined) {
+      conditions.push(
+        sql`coalesce(${schema.recipes.prepTimeMinutes}, 0) + coalesce(${schema.recipes.cookTimeMinutes}, 0) <= ${filters.maxTotalTime}`,
+      );
+    }
+
+    for (const ingredient of filters.includeIngredients) {
+      const like = `%${ingredient}%`;
+      conditions.push(
+        sql`exists (
+          select 1
+          from jsonb_array_elements(${schema.recipes.ingredients}) elem(value)
+          where lower(elem.value ->> 'name') ilike ${like}
+        )`,
+      );
+    }
+
+    for (const ingredient of filters.excludeIngredients) {
+      const like = `%${ingredient}%`;
+      conditions.push(
+        sql`not exists (
+          select 1
+          from jsonb_array_elements(${schema.recipes.ingredients}) elem(value)
+          where lower(elem.value ->> 'name') ilike ${like}
+        )`,
+      );
+    }
+
+    if (filters.requiresPantry) {
+      if (!pantryUserId) {
+        throw new BadRequestException(
+          'Pantry-based ingredient filters require authentication',
+        );
+      }
+      const pantryMetrics = this.buildPantryMatchExpressions(pantryUserId);
+      if (filters.maxMissingIngredients !== undefined) {
+        conditions.push(
+          sql`${pantryMetrics.missingCount} <= ${filters.maxMissingIngredients}`,
+        );
+      }
+      if (filters.minMatchRatio !== undefined) {
+        conditions.push(
+          sql`${pantryMetrics.matchRatio} >= ${filters.minMatchRatio}`,
         );
       }
     }
